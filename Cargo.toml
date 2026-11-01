@@ -1,0 +1,22 @@
+[package]
+name = "codevisualizer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Step-by-step Python execution visualizer with variables, call stack and output"
+license = "MIT"
+readme = "README.md"
+publish = false
+keywords = ["python", "debugger", "visualization", "education", "egui"]
+categories = ["development-tools::debugging", "education"]
+
+[dependencies]
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "wayland", "x11", "default_fonts"] }
+egui = "0.37.0"
+rfd = "0.17.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[profile.release]
+lto = "thin"
+strip = true

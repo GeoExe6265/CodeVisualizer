@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # Build on the oldest supported runner to keep the glibc requirement low.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libgl1-mesa-dev
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Portable Python
+        run: |
+          mkdir -p dist/python-runtime
+          curl -fL --retry 3 -o /tmp/python.tar.gz \
+            'https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.12.16%2B20261026-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz'
+          echo "ce4f6d0a6cfdb3bed6e44c2f9affd85943c76a42e25ad3a259002f31d6fb8a20  /tmp/python.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/python.tar.gz -C dist/python-runtime --strip-components=1
+          cp dist/python-runtime/lib/python3.12/LICENSE.txt dist/python-runtime/LICENSE.txt
+          ./dist/python-runtime/bin/python3 --version
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/codevisualizer dist/
+          cp README.md LICENSE dist/
+          cp -r examples python assets docs dist/
+          cat > dist/README.txt <<'EOF'
+          CodeVisualizer — готовый бинарник для Linux x86_64
+
+          Python 3.12 уже включён в архив (папка python-runtime), поэтому
+          отдельно устанавливать Python или Rust не нужно. Если в системе
+          есть Python 3.10+, приложение использует его вместе с вашими
+          пакетами; иначе — встроенный Python со стандартной библиотекой.
+          Нужен только обычный Linux-десктоп с Wayland или X11.
+
+          Системные требования:
+            - x86_64 Linux;
+            - glibc 2.35+ (Ubuntu 22.04+, Debian 12+, Arch Linux, Fedora 36+);
+            - графическое окружение (KDE, GNOME, Xfce и т.п.).
+
+          Запуск:
+            ./codevisualizer examples/demo.py
+
+          Без аргумента откроется пустое окно: файл можно выбрать кнопкой
+          «Открыть…», перетащить в окно или вставить путь в поле на главном
+          экране. Кнопка «Демо» работает всегда — демо встроено в бинарник.
+
+          Встроенный Python содержит стандартную библиотеку. Сторонние пакеты
+          можно поставить в него:
+            ./python-runtime/bin/python3 -m pip install <пакет>
+
+          Лицензия приложения: MIT (см. LICENSE).
+          Python распространяется по лицензии PSF: python-runtime/LICENSE.txt.
+          EOF
+          tar -C dist -czf codevisualizer-linux-x86_64.tar.gz .
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: codevisualizer-linux-x86_64.tar.gz
+          generate_release_notes: true
