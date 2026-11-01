@@ -1,6 +1,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
@@ -9,6 +10,7 @@ use serde::Deserialize;
 use crate::value::ValueNode;
 
 const TRACER_SRC: &str = include_str!("../python/tracer.py");
+static SESSION_ID: AtomicU64 = AtomicU64::new(0);
 
 fn python_binary() -> PathBuf {
     if let Some(path) = std::env::var_os("CODEVISUALIZER_PYTHON") {
@@ -98,25 +100,42 @@ pub enum Incoming {
 pub struct Session {
     child: Child,
     stdin: ChildStdin,
+    input_path: PathBuf,
     pub rx: Receiver<Incoming>,
 }
 
 impl Session {
-    pub fn spawn(script: &Path, ctx: egui::Context) -> std::io::Result<Self> {
+    pub fn spawn(script: &Path, program_input: &str, ctx: egui::Context) -> std::io::Result<Self> {
         let dir = std::env::temp_dir().join("codevisualizer");
         std::fs::create_dir_all(&dir)?;
         let tracer_path = dir.join("tracer.py");
         std::fs::write(&tracer_path, TRACER_SRC)?;
 
-        let mut child = Command::new(python_binary())
+        let input_path = dir.join(format!(
+            "input-{}-{}.txt",
+            std::process::id(),
+            SESSION_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let normalized_input = program_input.replace("\r\n", "\n");
+        std::fs::write(&input_path, normalized_input)?;
+
+        let spawn = Command::new(python_binary())
             .arg("-u")
             .arg(&tracer_path)
             .arg(script)
+            .arg(&input_path)
             .env("PYTHONIOENCODING", "utf-8")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()?;
+            .spawn();
+        let mut child = match spawn {
+            Ok(child) => child,
+            Err(err) => {
+                let _ = std::fs::remove_file(&input_path);
+                return Err(err);
+            }
+        };
 
         let stdin = child.stdin.take().expect("stdin is piped");
         let stdout = child.stdout.take().expect("stdout is piped");
@@ -159,7 +178,12 @@ impl Session {
             }
         });
 
-        Ok(Self { child, stdin, rx })
+        Ok(Self {
+            child,
+            stdin,
+            input_path,
+            rx,
+        })
     }
 
     pub fn send(&mut self, command: &str) -> std::io::Result<()> {
@@ -177,6 +201,7 @@ impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        let _ = std::fs::remove_file(&self.input_path);
     }
 }
 
@@ -192,7 +217,7 @@ mod tests {
         let script = dir.join("sample.py");
         std::fs::write(&script, "x = 1\ny = x + 2\nprint(y)\n").unwrap();
 
-        let mut session = Session::spawn(&script, egui::Context::default()).unwrap();
+        let mut session = Session::spawn(&script, "", egui::Context::default()).unwrap();
 
         let first = next_event(&session);
         assert_eq!(first.kind, "line");
@@ -213,6 +238,38 @@ mod tests {
                 Incoming::Msg(TracerMsg::Finished { output, error, .. }) => {
                     assert!(error.is_none(), "unexpected error: {error:?}");
                     assert!(output.contains('3'), "missing output: {output:?}");
+                    break;
+                }
+                Incoming::Msg(_) => {}
+                Incoming::Stderr(line) => panic!("stderr: {line}"),
+                Incoming::Eof => panic!("unexpected EOF"),
+            }
+        }
+    }
+
+    #[test]
+    fn feeds_stdin_to_script() {
+        let dir = std::env::temp_dir().join("codevisualizer-test-input");
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("echo.py");
+        std::fs::write(&script, "name = input()\nprint(name.upper())\n").unwrap();
+
+        let mut session = Session::spawn(&script, "hello\n", egui::Context::default()).unwrap();
+
+        let first = next_event(&session);
+        assert_eq!(first.kind, "line");
+        assert_eq!(first.line, Some(1));
+
+        session.send("continue").unwrap();
+        loop {
+            match session
+                .rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("tracer timed out")
+            {
+                Incoming::Msg(TracerMsg::Finished { output, error, .. }) => {
+                    assert!(error.is_none(), "unexpected error: {error:?}");
+                    assert!(output.contains("HELLO"), "missing output: {output:?}");
                     break;
                 }
                 Incoming::Msg(_) => {}

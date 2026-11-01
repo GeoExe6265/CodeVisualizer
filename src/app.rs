@@ -57,6 +57,7 @@ pub struct App {
     show_globals: bool,
     scrolled_line: Option<usize>,
     auto_steps: usize,
+    program_input: String,
     path_input: String,
     ctx: egui::Context,
 }
@@ -78,6 +79,7 @@ impl App {
             show_globals: false,
             scrolled_line: None,
             auto_steps: 0,
+            program_input: String::new(),
             path_input: String::new(),
             ctx,
         };
@@ -151,7 +153,7 @@ impl App {
         };
         self.stop_session();
         self.reset_view();
-        match Session::spawn(&path, self.ctx.clone()) {
+        match Session::spawn(&path, &self.program_input, self.ctx.clone()) {
             Ok(session) => {
                 self.session = Some(session);
                 self.status = Status::Running;
@@ -409,6 +411,24 @@ impl App {
                         }
                     });
 
+                egui::CollapsingHeader::new("Ввод программы")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.label("Данные для input() и sys.stdin:");
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.program_input)
+                                .desired_rows(6)
+                                .desired_width(f32::INFINITY)
+                                .hint_text("3\n1 2 3"),
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.button("Очистить").clicked() {
+                                self.program_input.clear();
+                            }
+                            ui.weak("применяется при следующем запуске");
+                        });
+                    });
+
                 egui::CollapsingHeader::new("Вывод")
                     .default_open(true)
                     .show(ui, |ui| {
@@ -451,6 +471,8 @@ impl App {
                     if ui.button("Загрузить демо").clicked() {
                         self.load_demo();
                     }
+                    ui.add_space(8.0);
+                    ui.weak("Для задач с input() заполните «Ввод программы» справа.");
                 });
             });
             return;

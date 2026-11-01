@@ -5,7 +5,8 @@ Runs a Python script, pauses at every executed line and reports the current
 state (line, call stack, local and global variables, captured output) to the
 Rust UI as JSON lines on stdout.
 
-Commands are read from stdin, one per line:
+The optional second argument is a UTF-8 file whose contents are exposed to the
+script as stdin, so input() works. Commands are read from the real stdin pipe:
     step      - run until the next line and pause again
     continue  - run until the program finishes
     stop      - abort execution
@@ -23,12 +24,19 @@ MAX_REPR = 300
 MAX_VARS = 100
 
 if len(sys.argv) < 2:
-    print("usage: tracer.py <script.py>", file=sys.stderr)
+    print("usage: tracer.py <script.py> [input.txt]", file=sys.stderr)
     raise SystemExit(2)
 
 TARGET = os.path.abspath(sys.argv[1])
+INPUT_PATH = os.path.abspath(sys.argv[2]) if len(sys.argv) > 2 else None
 PROTO = sys.__stdout__
 COMMANDS = sys.__stdin__
+
+# Allow the traced script to import modules that live next to it. When Python
+# runs tracer.py, sys.path[0] points at the tracer directory instead.
+SCRIPT_DIR = os.path.dirname(TARGET)
+if SCRIPT_DIR and SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
 
 
 class StopExecution(BaseException):
@@ -115,6 +123,23 @@ def encode(value, depth=0, seen=None):
     if callable(value) or isinstance(value, (type, type(sys))):
         name = getattr(value, "__name__", "")
         return {"t": type_name, "repr": f"<{type_name} {name}>".strip()}
+
+    try:
+        attributes = vars(value)
+    except TypeError:
+        attributes = None
+
+    if attributes:
+        if id(value) in seen:
+            return {"t": type_name, "repr": f"<{type_name}, циклическая ссылка>"}
+        if depth >= MAX_DEPTH:
+            return {"t": type_name, "repr": f"<{type_name}, атрибутов {len(attributes)}>"}
+        inner = seen | {id(value)}
+        entries = [
+            [{"t": "str", "repr": name}, encode(item, depth + 1, inner)]
+            for name, item in list(attributes.items())[:MAX_ITEMS]
+        ]
+        return {"t": type_name, "entries": entries}
 
     return {"t": type_name, "repr": safe_repr(value)}
 
@@ -212,6 +237,14 @@ def main():
         emit({"type": "error", "message": f"Не удалось прочитать файл: {exc}"})
         return 1
 
+    input_handle = None
+    if INPUT_PATH:
+        try:
+            input_handle = open(INPUT_PATH, "r", encoding="utf-8")
+        except OSError as exc:
+            emit({"type": "error", "message": f"Не удалось открыть файл ввода: {exc}"})
+            return 1
+
     namespace = {
         "__name__": "__main__",
         "__file__": TARGET,
@@ -220,13 +253,16 @@ def main():
 
     sys.stdout = capture
     sys.stderr = capture
-    sys.stdin = io.StringIO("")
+    sys.stdin = input_handle if input_handle is not None else io.StringIO("")
+    sys.argv = [TARGET]
 
     try:
         code = compile(source, TARGET, "exec")
     except SyntaxError as exc:
         message = "".join(traceback.format_exception_only(type(exc), exc)).strip()
         emit({"type": "error", "message": message})
+        if input_handle is not None:
+            input_handle.close()
         return 1
 
     sys.settrace(tracer)
@@ -243,6 +279,8 @@ def main():
         }
     finally:
         sys.settrace(None)
+        if input_handle is not None:
+            input_handle.close()
 
     emit(status)
     return 0

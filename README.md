@@ -12,6 +12,7 @@
 ## Возможности
 
 - открытие `.py` файла: диалог, перетаскивание в окно или аргумент командной строки;
+- подача входных данных для `input()` и `sys.stdin`;
 - кнопки **Запустить**, **Шаг**, **Продолжить**, **Стоп**;
 - подсветка текущей строки с автопрокруткой;
 - дерево локальных и глобальных переменных: списки, словари, множества, кортежи;
@@ -115,6 +116,32 @@ KDE и в списке «Открыть с помощью» для `.py` фай�
 вывод программы. Переменные можно сворачивать и разворачивать, как в обычном
 отладчике.
 
+## Ввод данных
+
+Если скрипт использует `input()` или читает `sys.stdin`, откройте справа
+раздел **«Ввод программы»** и вставьте данные в том виде, в каком они обычно
+подаются в консоль. Например, для скрипта:
+
+```python
+n = int(input())
+numbers = [int(input()) for _ in range(n)]
+print(sum(numbers))
+```
+
+нужно вставить:
+
+```text
+3
+10
+20
+30
+```
+
+Данные применяются при следующем запуске. Для задач, которые читают ввод до
+`EOF` (например, цикл `while True: input()`), просто вставьте все строки —
+концом ввода будет конец текста. Локальные модули рядом со скриптом тоже
+поддерживаются: их каталог добавляется в `sys.path`.
+
 ## Как это работает
 
 ```
@@ -181,6 +208,7 @@ CODEVISUALIZER_AUTOSTART=1 CODEVISUALIZER_AUTOSTEPS=20 \
 ## Ограничения текущей версии
 
 - трассируется только выбранный файл; код импортированных модулей не подсвечивается;
+- ввод программы задаётся заранее; интерактивный диалог с `input()` во время выполнения не поддерживается;
 - потоки, запущенные программой, не трассируются;
 - нет точек останова и условных остановок;
 - «Продолжить» всегда выполняет программу до конца;
@@ -205,5 +233,5 @@ Linux, built with Rust + egui and Python's `sys.settrace`. It shows the current
 line, variables, call stack and program output. The prebuilt release bundles
 Python 3.12 and needs no Rust or Python installation; it prefers the system
 Python 3.10+ when available (so pip packages work), otherwise falls back to the
-bundled interpreter. Building from source requires Rust 1.95+ and Python 3.10+.
-MIT licensed.
+bundled interpreter. Scripts can read stdin through the "Ввод программы" panel.
+Building from source requires Rust 1.95+ and Python 3.10+. MIT licensed.
