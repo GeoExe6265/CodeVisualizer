@@ -1,13 +1,10 @@
-use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::tracer::{FrameInfo, Incoming, Session, TracerMsg};
-use crate::value::{Focus, ValueNode, show_value};
+use crate::value::{Focus, ValueNode, is_data_structure, show_value};
 
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(110, 170, 255);
 const CURRENT_LINE_BG: egui::Color32 = egui::Color32::from_rgb(38, 72, 112);
-const FOCUS_LINE_BG: egui::Color32 = egui::Color32::from_rgb(32, 62, 94);
-const CURRENT_FOCUS_BG: egui::Color32 = egui::Color32::from_rgb(46, 92, 138);
 const ERROR: egui::Color32 = egui::Color32::from_rgb(255, 120, 120);
 const OK: egui::Color32 = egui::Color32::from_rgb(130, 210, 130);
 const DEMO_SRC: &str = include_str!("../examples/demo.py");
@@ -51,7 +48,7 @@ pub struct App {
     code: Vec<String>,
     current_line: Option<usize>,
     focus: Vec<Focus>,
-    focus_lines: HashSet<usize>,
+    only_structures: bool,
     locals: Vec<(String, ValueNode)>,
     globals: Vec<(String, ValueNode)>,
     stack: Vec<FrameInfo>,
@@ -75,7 +72,7 @@ impl App {
             code: Vec::new(),
             current_line: None,
             focus: Vec::new(),
-            focus_lines: HashSet::new(),
+            only_structures: true,
             locals: Vec::new(),
             globals: Vec::new(),
             stack: Vec::new(),
@@ -147,7 +144,6 @@ impl App {
     fn reset_view(&mut self) {
         self.current_line = None;
         self.focus.clear();
-        self.focus_lines.clear();
         self.locals.clear();
         self.globals.clear();
         self.stack.clear();
@@ -221,9 +217,6 @@ impl App {
                 self.focus = event.focus;
                 if let Some(line) = event.line {
                     self.current_line = Some(line);
-                    if !self.focus.is_empty() {
-                        self.focus_lines.insert(line);
-                    }
                 }
                 self.locals = event.locals;
                 self.globals = event.globals;
@@ -373,6 +366,7 @@ impl App {
 
     fn side_panel(&mut self, ui: &mut egui::Ui) {
         let mut show_globals = self.show_globals;
+        let mut only_structures = self.only_structures;
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -389,6 +383,10 @@ impl App {
                             ui.selectable_value(&mut show_globals, false, "Локальные");
                             ui.selectable_value(&mut show_globals, true, "Глобальные");
                         });
+                        ui.checkbox(&mut only_structures, "только массивы и словари");
+                        if only_structures {
+                            ui.weak("скаляры и вспомогательные переменные скрыты");
+                        }
 
                         if !self.focus.is_empty() {
                             let labels = self
@@ -410,11 +408,20 @@ impl App {
                         } else {
                             &self.locals
                         };
+                        let visible: Vec<(&String, &ValueNode)> = variables
+                            .iter()
+                            .filter(|(_, value)| !only_structures || is_data_structure(value))
+                            .map(|(name, value)| (name, value))
+                            .collect();
 
-                        if variables.is_empty() {
-                            ui.weak("нет данных");
+                        if visible.is_empty() {
+                            if only_structures && !variables.is_empty() {
+                                ui.weak("нет массивов или словарей");
+                            } else {
+                                ui.weak("нет данных");
+                            }
                         } else {
-                            for (name, value) in variables {
+                            for (name, value) in visible {
                                 let mut path = Vec::new();
                                 show_value(ui, name, value, name, &mut path, &self.focus);
                             }
@@ -472,6 +479,7 @@ impl App {
             });
 
         self.show_globals = show_globals;
+        self.only_structures = only_structures;
     }
 
     fn code_panel(&mut self, ui: &mut egui::Ui) {
@@ -510,8 +518,6 @@ impl App {
         }
 
         let current_line = self.current_line;
-        let focus_active = !self.focus.is_empty();
-        let focus_lines = &self.focus_lines;
         let mut scrolled_line = self.scrolled_line;
         let code = &self.code;
         let line_height = ui.text_style_height(&egui::TextStyle::Monospace);
@@ -524,15 +530,8 @@ impl App {
                 for (index, line) in code.iter().enumerate() {
                     let number = index + 1;
                     let is_current = current_line == Some(number);
-                    let has_focus = focus_lines.contains(&number);
                     let fill = if is_current {
-                        if focus_active {
-                            CURRENT_FOCUS_BG
-                        } else {
-                            CURRENT_LINE_BG
-                        }
-                    } else if has_focus {
-                        FOCUS_LINE_BG
+                        CURRENT_LINE_BG
                     } else {
                         egui::Color32::TRANSPARENT
                     };
@@ -561,15 +560,6 @@ impl App {
                                 );
                             });
                         });
-
-                    if has_focus {
-                        let rect = response.response.rect;
-                        ui.painter().rect_filled(
-                            egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())),
-                            0.0,
-                            ACCENT,
-                        );
-                    }
 
                     if is_current {
                         current_rect = Some(response.response.rect);

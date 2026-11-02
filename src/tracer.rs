@@ -341,6 +341,66 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn reports_both_elements_of_a_swap() {
+        let dir = std::env::temp_dir().join("codevisualizer-test-focus-swap");
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("focus_swap.py");
+        std::fs::write(
+            &script,
+            "values = [10, 20, 30]\ni = 0\nj = 2\nvalues[i], values[j] = values[j], values[i]\nprint(values)\n",
+        )
+        .unwrap();
+
+        let mut session = Session::spawn(&script, "", egui::Context::default()).unwrap();
+
+        assert_eq!(next_event(&session).line, Some(1));
+        session.send("step").unwrap();
+        assert_eq!(next_event(&session).line, Some(2));
+        session.send("step").unwrap();
+        assert_eq!(next_event(&session).line, Some(3));
+        session.send("step").unwrap();
+        let event = next_event(&session);
+
+        assert_eq!(event.line, Some(4));
+        let mut labels = event
+            .focus
+            .iter()
+            .map(|focus| focus.label.as_str())
+            .collect::<Vec<_>>();
+        labels.sort_unstable();
+        assert_eq!(labels, ["values[0]", "values[2]"]);
+    }
+
+    #[test]
+    fn reports_focused_matrix_element() {
+        let dir = std::env::temp_dir().join("codevisualizer-test-focus-matrix");
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("focus_matrix.py");
+        std::fs::write(
+            &script,
+            "matrix = [[1, 2], [3, 4]]\nrow = 0\ncol = 1\nvalue = matrix[row][col]\nprint(value)\n",
+        )
+        .unwrap();
+
+        let mut session = Session::spawn(&script, "", egui::Context::default()).unwrap();
+
+        assert_eq!(next_event(&session).line, Some(1));
+        session.send("step").unwrap();
+        assert_eq!(next_event(&session).line, Some(2));
+        session.send("step").unwrap();
+        assert_eq!(next_event(&session).line, Some(3));
+        session.send("step").unwrap();
+        let event = next_event(&session);
+
+        assert_eq!(event.line, Some(4));
+        assert_eq!(event.focus.len(), 1);
+        let focus = &event.focus[0];
+        assert_eq!(focus.variable, "matrix");
+        assert_eq!(focus.label, "matrix[0][1]");
+        assert_eq!(focus.path.len(), 2);
+    }
+
     fn next_event(session: &Session) -> TracerEvent {
         match session
             .rx

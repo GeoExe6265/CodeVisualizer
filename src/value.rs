@@ -1,6 +1,8 @@
 use serde::Deserialize;
 
 const FOCUS_ARROW: egui::Color32 = egui::Color32::from_rgb(110, 170, 255);
+const FOCUS_ELEMENT_BG: egui::Color32 = egui::Color32::from_rgb(43, 79, 119);
+const FOCUS_ELEMENT_BORDER: egui::Color32 = egui::Color32::from_rgb(110, 170, 255);
 
 /// A serialized Python value produced by `python/tracer.py`.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -78,6 +80,17 @@ impl ValueNode {
     }
 }
 
+/// Whether the value is a list/array-like structure, a dict, or an object
+/// that contains such structures. Scalar variables are hidden in the default
+/// "structures only" view.
+pub fn is_data_structure(value: &ValueNode) -> bool {
+    matches!(value.type_name.as_str(), "list" | "tuple" | "dict")
+        || value
+            .entries
+            .iter()
+            .any(|(_, item)| is_data_structure(item))
+}
+
 pub fn show_value(
     ui: &mut egui::Ui,
     name: &str,
@@ -89,21 +102,49 @@ pub fn show_value(
     let focused = is_focused(focus, root, path);
 
     if !value.is_container() {
-        ui.horizontal(|ui| {
-            if focused {
-                ui.label(egui::RichText::new("->").color(FOCUS_ARROW).strong());
-            }
-            ui.monospace(name);
-            ui.monospace("=");
-            ui.label(
-                egui::RichText::new(&value.repr)
-                    .monospace()
-                    .color(type_color(&value.type_name)),
-            );
-        });
+        let row = |ui: &mut egui::Ui| {
+            ui.horizontal(|ui| {
+                if focused {
+                    ui.label(egui::RichText::new("->").color(FOCUS_ARROW).strong());
+                }
+                ui.monospace(name);
+                ui.monospace("=");
+                ui.label(
+                    egui::RichText::new(&value.repr)
+                        .monospace()
+                        .color(type_color(&value.type_name)),
+                );
+            });
+        };
+
+        if focused {
+            egui::Frame::NONE
+                .fill(FOCUS_ELEMENT_BG)
+                .stroke(egui::Stroke::new(1.0, FOCUS_ELEMENT_BORDER))
+                .corner_radius(4)
+                .inner_margin(egui::Margin::symmetric(4, 1))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    row(ui);
+                });
+        } else {
+            row(ui);
+        }
         return;
     }
 
+    // Dicts are shown whole. For custom objects, only attributes that are
+    // data structures are shown, so helper fields do not clutter the panel.
+    let show_all_entries = value.type_name == "dict";
+    let visible_entries: Vec<(&ValueNode, &ValueNode)> = value
+        .entries
+        .iter()
+        .filter(|(_, item)| show_all_entries || is_data_structure(item))
+        .map(|(key, item)| (key, item))
+        .collect();
+    let hidden_entries = value.entries.len().saturating_sub(visible_entries.len());
+    let visible_count = visible_entries.len();
+    let shown = value.items.len() + visible_count;
     let header = format!("{name} = {}({})", value.type_name, value.count());
     egui::CollapsingHeader::new(header_widget(
         ui,
@@ -119,7 +160,7 @@ pub fn show_value(
             path.pop();
         }
 
-        for (key, item) in &value.entries {
+        for (key, item) in visible_entries {
             let key_name = if key.repr.is_empty() {
                 format!("<{}>", key.type_name)
             } else {
@@ -132,8 +173,10 @@ pub fn show_value(
             path.pop();
         }
 
-        let shown = value.items.len() + value.entries.len();
-        if value.count() > shown {
+        if hidden_entries > 0 {
+            ui.weak(format!("… скрыто атрибутов: {hidden_entries}"));
+        }
+        if matches!(value.type_name.as_str(), "list" | "tuple" | "dict") && value.count() > shown {
             ui.weak(format!("… показаны первые {shown}"));
         }
     });
@@ -146,6 +189,11 @@ fn header_widget(
     focused: bool,
 ) -> egui::WidgetText {
     let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+    let background = if focused {
+        FOCUS_ELEMENT_BG
+    } else {
+        egui::Color32::TRANSPARENT
+    };
     let mut job = egui::text::LayoutJob::default();
     if focused {
         job.append(
@@ -154,6 +202,7 @@ fn header_widget(
             egui::TextFormat {
                 font_id: font_id.clone(),
                 color: FOCUS_ARROW,
+                background,
                 ..Default::default()
             },
         );
@@ -164,6 +213,7 @@ fn header_widget(
         egui::TextFormat {
             font_id,
             color,
+            background,
             ..Default::default()
         },
     );
@@ -216,5 +266,37 @@ mod tests {
                 FocusStep::Index { index: 0 }
             ]
         ));
+    }
+
+    #[test]
+    fn structures_only_keeps_containers() {
+        let scalar = ValueNode {
+            type_name: "int".to_owned(),
+            repr: "1".to_owned(),
+            ..Default::default()
+        };
+        let list = ValueNode {
+            type_name: "list".to_owned(),
+            items: vec![scalar.clone()],
+            ..Default::default()
+        };
+        let dict = ValueNode {
+            type_name: "dict".to_owned(),
+            entries: vec![(scalar.clone(), scalar.clone())],
+            ..Default::default()
+        };
+        let object = ValueNode {
+            type_name: "Box".to_owned(),
+            entries: vec![
+                (scalar.clone(), list.clone()),
+                (scalar.clone(), scalar.clone()),
+            ],
+            ..Default::default()
+        };
+
+        assert!(!is_data_structure(&scalar));
+        assert!(is_data_structure(&list));
+        assert!(is_data_structure(&dict));
+        assert!(is_data_structure(&object));
     }
 }

@@ -15,8 +15,9 @@
 - подача входных данных для `input()` и `sys.stdin`;
 - кнопки **Запустить**, **Шаг**, **Продолжить**, **Стоп**;
 - подсветка текущей строки с автопрокруткой;
-- указатель `->` на элемент списка или словаря, с которым работает текущая строка;
-- дерево локальных и глобальных переменных: списки, словари, множества, кортежи;
+- подсветка самих элементов списков, матриц и словарей, с которыми работает текущая строка;
+- режим **«только массивы и словари»**: скаляры и служебные переменные скрыты;
+- дерево локальных и глобальных переменных: списки, кортежи, словари и объекты с такими полями;
 - стек вызовов с номерами строк;
 - перехват `print` и вывода в `stderr`;
 - показ необработанного исключения вместе с состоянием на месте ошибки;
@@ -143,34 +144,44 @@ print(sum(numbers))
 концом ввода будет конец текста. Локальные модули рядом со скриптом тоже
 поддерживаются: их каталог добавляется в `sys.path`.
 
-## Указатель на элементы
+## Подсветка элементов
 
-Если текущая строка обращается к элементу списка или словаря, в панели
-переменных появляется стрелка `->` у нужного элемента, а строка подсвечивается
-мягким синим цветом. Строки, где такие обращения уже выполнялись, остаются
-слегка подсвеченными — по ним видно, где программа работала со структурами
-данных.
+Когда текущая строка обращается к элементу списка, матрицы или словаря, сам
+элемент в панели переменных выделяется рамкой и фоном, а слева появляется
+стрелка `->`. Если на строке происходит обмен, подсвечиваются оба элемента,
+которые поменяются местами. Например, на строке:
+
+```python
+values[0], values[2] = values[2], values[0]
+```
+
+в дереве будут выделены `values[0]` и `values[2]`.
 
 Поддерживаются:
 
-- `values[index]`, `matrix[row][col]`;
+- `values[index]`, `matrix[row][col]` — матрица раскрывается как вложенные списки;
 - `prices[name]`, вложенные `data[key][index]`;
 - `obj.items[i]` для атрибутов объектов;
-- вызовы `values.append(...)`, `prices.get(...)` — стрелка у самого списка или
-  словаря.
+- вызовы `values.append(...)`, `prices.get(...)` — выделяется сам список или словарь.
 
 Если индекс — вызов функции или слишком сложное выражение, указатель не
 строится: трейсер не выполняет пользовательский код ради анализа. Пример:
 `examples/focus_demo.py`.
 
-![Указатель на элемент](docs/focus.png)
+По умолчанию включён режим **«только массивы и словари»**: в панели остаются
+списки, кортежи, матрицы, словари и объекты, содержащие такие структуры.
+Скаляры вроде `i`, `n`, `temp` скрыты — снимите галочку, чтобы показать все
+переменные. Строка кода при этом подсвечивается только как текущая; акцент
+сделан именно на элементах данных.
+
+![Подсветка элементов](docs/focus.png)
 
 ## Как это работает
 
 ```
 Rust + egui (UI)  ←— JSON-строки через stdin/stdout —→  python/tracer.py
       │                                                       │
- подсветка строки,                                   sys.settrace,
+ подсветка элементов,                                sys.settrace,
  дерево переменных,                                  снимки f_locals/f_globals,
  стек вызовов, вывод                                 перехват stdout/stderr
 ```
@@ -201,8 +212,8 @@ cargo build --release --locked
 ## Релиз
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.2.1
+git push origin v0.2.1
 ```
 
 Workflow `.github/workflows/release.yml` соберёт
@@ -253,9 +264,10 @@ MIT — см. [LICENSE](LICENSE).
 
 **English:** CodeVisualizer is a step-by-step Python execution visualizer for
 Linux, built with Rust + egui and Python's `sys.settrace`. It shows the current
-line, variables, call stack and program output, and points at the list/dict
-element used by the current line. The prebuilt release bundles
-Python 3.12 and needs no Rust or Python installation; it prefers the system
-Python 3.10+ when available (so pip packages work), otherwise falls back to the
-bundled interpreter. Scripts can read stdin through the "Ввод программы" panel.
-Building from source requires Rust 1.95+ and Python 3.10+. MIT licensed.
+line, variables, call stack and program output, highlights the list/array/dict
+elements used by the current line (including both sides of a swap), and can hide
+scalar helper variables so only data structures remain. The prebuilt release
+bundles Python 3.12 and needs no Rust or Python installation; it prefers the
+system Python 3.10+ when available (so pip packages work), otherwise falls back
+to the bundled interpreter. Scripts can read stdin through the "Ввод программы"
+panel. Building from source requires Rust 1.95+ and Python 3.10+. MIT licensed.
