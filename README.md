@@ -15,6 +15,7 @@
 - подача входных данных для `input()` и `sys.stdin`;
 - кнопки **Запустить**, **Шаг**, **Продолжить**, **Стоп**;
 - подсветка текущей строки с автопрокруткой;
+- указатель `->` на элемент списка или словаря, с которым работает текущая строка;
 - дерево локальных и глобальных переменных: списки, словари, множества, кортежи;
 - стек вызовов с номерами строк;
 - перехват `print` и вывода в `stderr`;
@@ -142,6 +143,28 @@ print(sum(numbers))
 концом ввода будет конец текста. Локальные модули рядом со скриптом тоже
 поддерживаются: их каталог добавляется в `sys.path`.
 
+## Указатель на элементы
+
+Если текущая строка обращается к элементу списка или словаря, в панели
+переменных появляется стрелка `->` у нужного элемента, а строка подсвечивается
+мягким синим цветом. Строки, где такие обращения уже выполнялись, остаются
+слегка подсвеченными — по ним видно, где программа работала со структурами
+данных.
+
+Поддерживаются:
+
+- `values[index]`, `matrix[row][col]`;
+- `prices[name]`, вложенные `data[key][index]`;
+- `obj.items[i]` для атрибутов объектов;
+- вызовы `values.append(...)`, `prices.get(...)` — стрелка у самого списка или
+  словаря.
+
+Если индекс — вызов функции или слишком сложное выражение, указатель не
+строится: трейсер не выполняет пользовательский код ради анализа. Пример:
+`examples/focus_demo.py`.
+
+![Указатель на элемент](docs/focus.png)
+
 ## Как это работает
 
 ```
@@ -178,8 +201,8 @@ cargo build --release --locked
 ## Релиз
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 Workflow `.github/workflows/release.yml` соберёт
@@ -230,7 +253,8 @@ MIT — см. [LICENSE](LICENSE).
 
 **English:** CodeVisualizer is a step-by-step Python execution visualizer for
 Linux, built with Rust + egui and Python's `sys.settrace`. It shows the current
-line, variables, call stack and program output. The prebuilt release bundles
+line, variables, call stack and program output, and points at the list/dict
+element used by the current line. The prebuilt release bundles
 Python 3.12 and needs no Rust or Python installation; it prefers the system
 Python 3.10+ when available (so pip packages work), otherwise falls back to the
 bundled interpreter. Scripts can read stdin through the "Ввод программы" panel.

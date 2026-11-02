@@ -7,7 +7,7 @@ use std::thread;
 
 use serde::Deserialize;
 
-use crate::value::ValueNode;
+use crate::value::{Focus, ValueNode};
 
 const TRACER_SRC: &str = include_str!("../python/tracer.py");
 static SESSION_ID: AtomicU64 = AtomicU64::new(0);
@@ -71,6 +71,8 @@ pub struct TracerEvent {
     pub output: String,
     #[serde(default)]
     pub exception: Option<String>,
+    #[serde(default)]
+    pub focus: Vec<Focus>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -277,6 +279,66 @@ mod tests {
                 Incoming::Eof => panic!("unexpected EOF"),
             }
         }
+    }
+
+    #[test]
+    fn reports_focused_list_element() {
+        let dir = std::env::temp_dir().join("codevisualizer-test-focus-list");
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("focus_list.py");
+        std::fs::write(
+            &script,
+            "values = [10, 20, 30]\nindex = 1\nvalue = values[index]\nprint(value)\n",
+        )
+        .unwrap();
+
+        let mut session = Session::spawn(&script, "", egui::Context::default()).unwrap();
+
+        assert_eq!(next_event(&session).line, Some(1));
+        session.send("step").unwrap();
+        assert_eq!(next_event(&session).line, Some(2));
+        session.send("step").unwrap();
+        let event = next_event(&session);
+
+        assert_eq!(event.line, Some(3));
+        assert_eq!(event.focus.len(), 1);
+        let focus = &event.focus[0];
+        assert_eq!(focus.variable, "values");
+        assert_eq!(focus.label, "values[1]");
+        assert!(matches!(
+            focus.path.first(),
+            Some(crate::value::FocusStep::Index { index: 1 })
+        ));
+    }
+
+    #[test]
+    fn reports_focused_dict_entry() {
+        let dir = std::env::temp_dir().join("codevisualizer-test-focus-dict");
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("focus_dict.py");
+        std::fs::write(
+            &script,
+            "data = {'a': 1, 'b': 2}\nkey = 'b'\nvalue = data[key]\nprint(value)\n",
+        )
+        .unwrap();
+
+        let mut session = Session::spawn(&script, "", egui::Context::default()).unwrap();
+
+        assert_eq!(next_event(&session).line, Some(1));
+        session.send("step").unwrap();
+        assert_eq!(next_event(&session).line, Some(2));
+        session.send("step").unwrap();
+        let event = next_event(&session);
+
+        assert_eq!(event.line, Some(3));
+        assert_eq!(event.focus.len(), 1);
+        let focus = &event.focus[0];
+        assert_eq!(focus.variable, "data");
+        assert_eq!(focus.label, "data['b']");
+        assert!(matches!(
+            focus.path.first(),
+            Some(crate::value::FocusStep::Key { key }) if key == "'b'"
+        ));
     }
 
     fn next_event(session: &Session) -> TracerEvent {
