@@ -27,6 +27,7 @@ MAX_FOCUS = 4
 
 SUBSCRIPT_NODES = []
 METHOD_NODES = []
+ASSIGN_NODES = []
 METHOD_NAMES = {
     "append",
     "clear",
@@ -312,6 +313,67 @@ def is_prefix(short, long):
     return len(short) <= len(long) and all(a == b for a, b in zip(short, long))
 
 
+def assignment_roles(frame):
+    """Return the primary element and elements used as its source.
+
+    A plain read such as ``x = values[i]`` has no primary assignment target;
+    the first focused element is made primary later.  For ``values[i] = values[j]``
+    the target ``values[i]`` is primary and ``values[j]`` is its source.  For a
+    tuple swap both target paths are collected, then the first target is primary
+    and the other element becomes the source highlighted in red.
+    """
+    line = frame.f_lineno
+    primary = None
+    sources = set()
+
+    for node in ASSIGN_NODES:
+        end = getattr(node, "end_lineno", None) or node.lineno
+        if not (node.lineno <= line <= end):
+            continue
+
+        if isinstance(node, ast.Assign):
+            targets = []
+            for target in node.targets:
+                if isinstance(target, (ast.Tuple, ast.List)):
+                    targets.extend(target.elts)
+                else:
+                    targets.append(target)
+            value = node.value
+        elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+            targets = [node.target]
+            value = node.value
+        else:
+            continue
+
+        target_sigs = []
+        for target in targets:
+            try:
+                root, steps, _ = resolve_chain(target, frame)
+            except Exception:
+                continue
+            if not steps:
+                continue
+            target_sigs.append((root, tuple(step_id(kind, item) for kind, item in steps)))
+
+        if not target_sigs:
+            continue
+        if primary is None:
+            primary = target_sigs[0]
+
+        for subscript in ast.walk(value):
+            if not isinstance(subscript, ast.Subscript):
+                continue
+            try:
+                root, steps, _ = resolve_chain(subscript, frame)
+            except Exception:
+                continue
+            sources.add((root, tuple(step_id(kind, item) for kind, item in steps)))
+
+    if primary is not None:
+        sources.discard(primary)
+    return primary, sources
+
+
 def focus_targets(frame):
     """Find list/dict elements touched by the current source line."""
     line = frame.f_lineno
@@ -350,6 +412,7 @@ def focus_targets(frame):
 
     # For matrix[i][j] prefer the element over the intermediate row.
     targets.sort(key=lambda item: len(item[1]), reverse=True)
+    primary, sources = assignment_roles(frame)
     kept = []
     result = []
     for root, steps, label_override in targets:
@@ -360,15 +423,28 @@ def focus_targets(frame):
         ):
             continue
         kept.append((root, signature))
+        full_signature = (root, signature)
+        if primary is not None and full_signature == primary:
+            role = "primary"
+        elif full_signature in sources:
+            role = "source"
+        else:
+            role = "peer"
         result.append(
             {
                 "variable": root,
                 "path": [step_payload(kind, value) for kind, value in steps],
                 "label": label_override or label_for(root, steps),
+                "role": role,
             }
         )
         if len(result) >= MAX_FOCUS:
             break
+
+    # If an assignment target could not be resolved (for example, a target is
+    # not a subscript), still keep exactly one pointer on the first element.
+    if result and not any(item["role"] == "primary" for item in result):
+        result[0]["role"] = "primary"
     return result
 
 
@@ -431,7 +507,7 @@ def error_from_traceback(exc):
 
 
 def main():
-    global SUBSCRIPT_NODES, METHOD_NODES
+    global SUBSCRIPT_NODES, METHOD_NODES, ASSIGN_NODES
 
     try:
         with open(TARGET, "r", encoding="utf-8") as handle:
@@ -454,6 +530,11 @@ def main():
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr in METHOD_NAMES
+        ]
+        ASSIGN_NODES = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign))
         ]
 
     input_handle = None

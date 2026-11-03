@@ -1,8 +1,10 @@
 use serde::Deserialize;
 
-const FOCUS_ARROW: egui::Color32 = egui::Color32::from_rgb(110, 170, 255);
-const FOCUS_ELEMENT_BG: egui::Color32 = egui::Color32::from_rgb(43, 79, 119);
-const FOCUS_ELEMENT_BORDER: egui::Color32 = egui::Color32::from_rgb(110, 170, 255);
+const ACTION_ARROW: egui::Color32 = egui::Color32::from_rgb(110, 210, 140);
+const ACTION_ELEMENT_BG: egui::Color32 = egui::Color32::from_rgb(43, 92, 61);
+const ACTION_ELEMENT_BORDER: egui::Color32 = egui::Color32::from_rgb(110, 210, 140);
+const SOURCE_ELEMENT_BG: egui::Color32 = egui::Color32::from_rgb(104, 48, 53);
+const SOURCE_ELEMENT_BORDER: egui::Color32 = egui::Color32::from_rgb(240, 115, 115);
 
 /// A serialized Python value produced by `python/tracer.py`.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -28,6 +30,17 @@ pub struct Focus {
     pub path: Vec<FocusStep>,
     #[serde(default)]
     pub label: String,
+    #[serde(default)]
+    pub role: FocusRole,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FocusRole {
+    Primary,
+    Source,
+    #[default]
+    Peer,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -66,8 +79,11 @@ impl Focus {
     }
 }
 
-fn is_focused(focus: &[Focus], root: &str, path: &[FocusStep]) -> bool {
-    focus.iter().any(|target| target.matches(root, path))
+fn focus_role(focus: &[Focus], root: &str, path: &[FocusStep]) -> Option<FocusRole> {
+    focus
+        .iter()
+        .find(|target| target.matches(root, path))
+        .map(|target| target.role)
 }
 
 impl ValueNode {
@@ -99,13 +115,20 @@ pub fn show_value(
     path: &mut Vec<FocusStep>,
     focus: &[Focus],
 ) {
-    let focused = is_focused(focus, root, path);
+    let role = focus_role(focus, root, path);
+    let highlighted = role.is_some();
+    let show_pointer = role == Some(FocusRole::Primary);
+    let (fill, border) = match role {
+        Some(FocusRole::Source) => (SOURCE_ELEMENT_BG, SOURCE_ELEMENT_BORDER),
+        Some(_) => (ACTION_ELEMENT_BG, ACTION_ELEMENT_BORDER),
+        None => (egui::Color32::TRANSPARENT, egui::Color32::TRANSPARENT),
+    };
 
     if !value.is_container() {
         let row = |ui: &mut egui::Ui| {
             ui.horizontal(|ui| {
-                if focused {
-                    ui.label(egui::RichText::new("->").color(FOCUS_ARROW).strong());
+                if show_pointer {
+                    ui.label(egui::RichText::new("->").color(ACTION_ARROW).strong());
                 }
                 ui.monospace(name);
                 ui.monospace("=");
@@ -117,10 +140,10 @@ pub fn show_value(
             });
         };
 
-        if focused {
+        if highlighted {
             egui::Frame::NONE
-                .fill(FOCUS_ELEMENT_BG)
-                .stroke(egui::Stroke::new(1.0, FOCUS_ELEMENT_BORDER))
+                .fill(fill)
+                .stroke(egui::Stroke::new(1.0, border))
                 .corner_radius(4)
                 .inner_margin(egui::Margin::symmetric(4, 1))
                 .show(ui, |ui| {
@@ -150,7 +173,7 @@ pub fn show_value(
         ui,
         header,
         type_color(&value.type_name),
-        focused,
+        role,
     ))
     .default_open(true)
     .show(ui, |ui| {
@@ -186,22 +209,23 @@ fn header_widget(
     ui: &egui::Ui,
     text: String,
     color: egui::Color32,
-    focused: bool,
+    role: Option<FocusRole>,
 ) -> egui::WidgetText {
     let font_id = egui::TextStyle::Monospace.resolve(ui.style());
-    let background = if focused {
-        FOCUS_ELEMENT_BG
-    } else {
-        egui::Color32::TRANSPARENT
+    let show_pointer = role == Some(FocusRole::Primary);
+    let background = match role {
+        Some(FocusRole::Source) => SOURCE_ELEMENT_BG,
+        Some(_) => ACTION_ELEMENT_BG,
+        None => egui::Color32::TRANSPARENT,
     };
     let mut job = egui::text::LayoutJob::default();
-    if focused {
+    if show_pointer {
         job.append(
             "-> ",
             0.0,
             egui::TextFormat {
                 font_id: font_id.clone(),
-                color: FOCUS_ARROW,
+                color: ACTION_ARROW,
                 background,
                 ..Default::default()
             },
@@ -246,6 +270,7 @@ mod tests {
                 FocusStep::Index { index: 1 },
             ],
             label: "box.items[1]".to_owned(),
+            role: FocusRole::Primary,
         };
 
         assert!(focus.matches(

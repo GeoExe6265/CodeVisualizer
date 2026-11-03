@@ -15,7 +15,8 @@
 - подача входных данных для `input()` и `sys.stdin`;
 - кнопки **Запустить**, **Шаг**, **Продолжить**, **Стоп**;
 - подсветка текущей строки с автопрокруткой;
-- подсветка самих элементов списков, матриц и словарей, с которыми работает текущая строка;
+- подсветка самих элементов списков, матриц и словарей, с которыми работает текущая строка: активный элемент зелёный, элемент обмена — красный;
+- только одна стрелка `->` — у активного элемента;
 - режим **«только массивы и словари»**: скаляры и служебные переменные скрыты;
 - дерево локальных и глобальных переменных: списки, кортежи, словари и объекты с такими полями;
 - стек вызовов с номерами строк;
@@ -147,15 +148,17 @@ print(sum(numbers))
 ## Подсветка элементов
 
 Когда текущая строка обращается к элементу списка, матрицы или словаря, сам
-элемент в панели переменных выделяется рамкой и фоном, а слева появляется
-стрелка `->`. Если на строке происходит обмен, подсвечиваются оба элемента,
-которые поменяются местами. Например, на строке:
+элемент в панели переменных выделяется зелёным фоном и рамкой, а слева
+появляется стрелка `->`. Если на строке происходит обмен, активный элемент
+остаётся зелёным со стрелкой, а элемент, с которым его меняют, выделяется
+красным без стрелки. Например, на строке:
 
 ```python
 values[0], values[2] = values[2], values[0]
 ```
 
-в дереве будут выделены `values[0]` и `values[2]`.
+`values[0]` будет зелёным с `->`, а `values[2]` — красным без стрелки. Стрелка
+всегда одна.
 
 Поддерживаются:
 
@@ -212,8 +215,8 @@ cargo build --release --locked
 ## Релиз
 
 ```bash
-git tag v0.2.1
-git push origin v0.2.1
+git tag v0.2.2
+git push origin v0.2.2
 ```
 
 Workflow `.github/workflows/release.yml` соберёт
@@ -265,8 +268,9 @@ MIT — см. [LICENSE](LICENSE).
 **English:** CodeVisualizer is a step-by-step Python execution visualizer for
 Linux, built with Rust + egui and Python's `sys.settrace`. It shows the current
 line, variables, call stack and program output, highlights the list/array/dict
-elements used by the current line (including both sides of a swap), and can hide
-scalar helper variables so only data structures remain. The prebuilt release
+elements used by the current line (the active element in green with a single
+pointer, its swap source in red without a pointer), and can hide scalar helper
+variables so only data structures remain. The prebuilt release
 bundles Python 3.12 and needs no Rust or Python installation; it prefers the
 system Python 3.10+ when available (so pip packages work), otherwise falls back
 to the bundled interpreter. Scripts can read stdin through the "Ввод программы"

@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 
 use crate::tracer::{FrameInfo, Incoming, Session, TracerMsg};
-use crate::value::{Focus, ValueNode, is_data_structure, show_value};
+use crate::value::{Focus, FocusRole, ValueNode, is_data_structure, show_value};
 
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(110, 170, 255);
+const ACTION_GREEN: egui::Color32 = egui::Color32::from_rgb(110, 210, 140);
+const SOURCE_RED: egui::Color32 = egui::Color32::from_rgb(240, 115, 115);
 const CURRENT_LINE_BG: egui::Color32 = egui::Color32::from_rgb(38, 72, 112);
 const ERROR: egui::Color32 = egui::Color32::from_rgb(255, 120, 120);
 const OK: egui::Color32 = egui::Color32::from_rgb(130, 210, 130);
@@ -389,16 +391,26 @@ impl App {
                         }
 
                         if !self.focus.is_empty() {
-                            let labels = self
+                            let primary_index = self
                                 .focus
                                 .iter()
-                                .map(|focus| focus.label.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", ");
+                                .position(|focus| focus.role == FocusRole::Primary)
+                                .unwrap_or(0);
                             ui.horizontal_wrapped(|ui| {
-                                ui.weak("Элемент:");
-                                ui.colored_label(ACCENT, "->");
-                                ui.monospace(labels);
+                                ui.weak("Действие:");
+                                for (index, focus) in self.focus.iter().enumerate() {
+                                    if index > 0 {
+                                        ui.weak(",");
+                                    }
+                                    if index == primary_index {
+                                        ui.colored_label(ACTION_GREEN, "->");
+                                        ui.colored_label(ACTION_GREEN, focus.label.as_str());
+                                    } else if focus.role == FocusRole::Source {
+                                        ui.colored_label(SOURCE_RED, focus.label.as_str());
+                                    } else {
+                                        ui.colored_label(ACTION_GREEN, focus.label.as_str());
+                                    }
+                                }
                             });
                         }
                         ui.add_space(4.0);

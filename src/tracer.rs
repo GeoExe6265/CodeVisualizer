@@ -305,6 +305,7 @@ mod tests {
         let focus = &event.focus[0];
         assert_eq!(focus.variable, "values");
         assert_eq!(focus.label, "values[1]");
+        assert_eq!(focus.role, crate::value::FocusRole::Primary);
         assert!(matches!(
             focus.path.first(),
             Some(crate::value::FocusStep::Index { index: 1 })
@@ -335,6 +336,7 @@ mod tests {
         let focus = &event.focus[0];
         assert_eq!(focus.variable, "data");
         assert_eq!(focus.label, "data['b']");
+        assert_eq!(focus.role, crate::value::FocusRole::Primary);
         assert!(matches!(
             focus.path.first(),
             Some(crate::value::FocusStep::Key { key }) if key == "'b'"
@@ -363,13 +365,58 @@ mod tests {
         let event = next_event(&session);
 
         assert_eq!(event.line, Some(4));
-        let mut labels = event
+        let primary = event
             .focus
             .iter()
-            .map(|focus| focus.label.as_str())
-            .collect::<Vec<_>>();
-        labels.sort_unstable();
-        assert_eq!(labels, ["values[0]", "values[2]"]);
+            .find(|focus| focus.label == "values[0]")
+            .expect("primary element");
+        let source = event
+            .focus
+            .iter()
+            .find(|focus| focus.label == "values[2]")
+            .expect("source element");
+        assert_eq!(primary.role, crate::value::FocusRole::Primary);
+        assert_eq!(source.role, crate::value::FocusRole::Source);
+        let primary_count = event
+            .focus
+            .iter()
+            .filter(|focus| focus.role == crate::value::FocusRole::Primary)
+            .count();
+        assert_eq!(primary_count, 1);
+    }
+
+    #[test]
+    fn reports_source_element_of_an_assignment() {
+        let dir = std::env::temp_dir().join("codevisualizer-test-focus-assignment");
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("focus_assignment.py");
+        std::fs::write(
+            &script,
+            "values = [10, 20, 30]\nj = 2\nvalues[0] = values[j]\nprint(values)\n",
+        )
+        .unwrap();
+
+        let mut session = Session::spawn(&script, "", egui::Context::default()).unwrap();
+
+        assert_eq!(next_event(&session).line, Some(1));
+        session.send("step").unwrap();
+        assert_eq!(next_event(&session).line, Some(2));
+        session.send("step").unwrap();
+        let event = next_event(&session);
+
+        assert_eq!(event.line, Some(3));
+        let primary = event
+            .focus
+            .iter()
+            .find(|focus| focus.label == "values[0]")
+            .expect("assignment target");
+        let source = event
+            .focus
+            .iter()
+            .find(|focus| focus.label == "values[2]")
+            .expect("assignment source");
+        assert_eq!(primary.role, crate::value::FocusRole::Primary);
+        assert_eq!(source.role, crate::value::FocusRole::Source);
     }
 
     #[test]
@@ -398,6 +445,7 @@ mod tests {
         let focus = &event.focus[0];
         assert_eq!(focus.variable, "matrix");
         assert_eq!(focus.label, "matrix[0][1]");
+        assert_eq!(focus.role, crate::value::FocusRole::Primary);
         assert_eq!(focus.path.len(), 2);
     }
 
