@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 
 use crate::tracer::{FrameInfo, Incoming, Session, TracerMsg};
 use crate::value::{Focus, FocusRole, ValueAnimations, ValueNode, is_data_structure, show_value};
@@ -10,6 +11,15 @@ const CURRENT_LINE_BG: egui::Color32 = egui::Color32::from_rgb(38, 72, 112);
 const ERROR: egui::Color32 = egui::Color32::from_rgb(255, 120, 120);
 const OK: egui::Color32 = egui::Color32::from_rgb(130, 210, 130);
 const DEMO_SRC: &str = include_str!("../examples/demo.py");
+const HISTORY_LIMIT: usize = 500;
+
+fn is_python_source(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("py") || extension.eq_ignore_ascii_case("pyw")
+        })
+}
 
 #[derive(Clone, Debug, PartialEq)]
 enum Status {
@@ -45,6 +55,130 @@ impl Status {
     }
 }
 
+#[derive(Clone, Default)]
+struct ViewSnapshot {
+    current_line: Option<usize>,
+    focus: Vec<Focus>,
+    locals: Vec<(String, ValueNode)>,
+    globals: Vec<(String, ValueNode)>,
+    stack: Vec<FrameInfo>,
+    output: String,
+    last_exception: Option<String>,
+}
+
+/// Saved UI states let the user step back without trying to rewind the
+/// Python process. Stepping forward through the saved states is local until
+/// the newest state is reached, then the tracer resumes live execution.
+#[derive(Default)]
+struct ViewHistory {
+    entries: VecDeque<ViewSnapshot>,
+    cursor: usize,
+}
+
+impl ViewHistory {
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.cursor = 0;
+    }
+
+    fn push(&mut self, snapshot: ViewSnapshot) {
+        if self.cursor + 1 < self.entries.len() {
+            self.entries.truncate(self.cursor + 1);
+        }
+        self.entries.push_back(snapshot);
+        if self.entries.len() > HISTORY_LIMIT {
+            self.entries.pop_front();
+        }
+        self.cursor = self.entries.len().saturating_sub(1);
+    }
+
+    fn back(&mut self) -> Option<ViewSnapshot> {
+        if self.cursor == 0 {
+            return None;
+        }
+        self.cursor -= 1;
+        self.entries.get(self.cursor).cloned()
+    }
+
+    fn forward(&mut self) -> Option<ViewSnapshot> {
+        if self.cursor + 1 >= self.entries.len() {
+            return None;
+        }
+        self.cursor += 1;
+        self.entries.get(self.cursor).cloned()
+    }
+
+    fn latest(&mut self) -> Option<ViewSnapshot> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        self.cursor = self.entries.len() - 1;
+        self.entries.back().cloned()
+    }
+
+    fn update_latest_output(&mut self, output: String) {
+        if let Some(latest) = self.entries.back_mut() {
+            latest.output = output;
+        }
+    }
+
+    fn has_back(&self) -> bool {
+        self.cursor > 0
+    }
+
+    fn has_forward(&self) -> bool {
+        self.cursor + 1 < self.entries.len()
+    }
+
+    fn position(&self) -> usize {
+        self.cursor + 1
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+fn draw_drop_overlay(ctx: &egui::Context, files: &[PathBuf]) {
+    let screen = ctx.content_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::unique("file-drop-overlay"),
+    ));
+    painter.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(200));
+
+    let border = screen.shrink(18.0);
+    painter.rect_stroke(
+        border,
+        12.0,
+        egui::Stroke::new(3.0, ACCENT),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        screen.center() - egui::vec2(0.0, 22.0),
+        egui::Align2::CENTER_CENTER,
+        "Отпустите файл, чтобы открыть его",
+        egui::FontId::proportional(26.0),
+        egui::Color32::WHITE,
+    );
+
+    let supported = files.iter().find(|path| is_python_source(path));
+    let detail = if let Some(path) = supported {
+        path.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string())
+    } else {
+        "Поддерживаются файлы Python: .py и .pyw".to_owned()
+    };
+    painter.text(
+        screen.center() + egui::vec2(0.0, 18.0),
+        egui::Align2::CENTER_CENTER,
+        detail,
+        egui::FontId::proportional(16.0),
+        egui::Color32::from_gray(205),
+    );
+}
+
 pub struct App {
     script_path: Option<PathBuf>,
     code: Vec<String>,
@@ -64,6 +198,7 @@ pub struct App {
     program_input: String,
     path_input: String,
     animations: ValueAnimations,
+    history: ViewHistory,
     ctx: egui::Context,
 }
 
@@ -89,6 +224,7 @@ impl App {
             program_input: String::new(),
             path_input: String::new(),
             animations: ValueAnimations::default(),
+            history: ViewHistory::default(),
             ctx,
         };
 
@@ -155,6 +291,7 @@ impl App {
         self.last_exception = None;
         self.scrolled_line = None;
         self.animations.clear();
+        self.history.clear();
     }
 
     fn start(&mut self) {
@@ -180,7 +317,62 @@ impl App {
         }
     }
 
+    fn snapshot(&self) -> ViewSnapshot {
+        ViewSnapshot {
+            current_line: self.current_line,
+            focus: self.focus.clone(),
+            locals: self.locals.clone(),
+            globals: self.globals.clone(),
+            stack: self.stack.clone(),
+            output: self.output.clone(),
+            last_exception: self.last_exception.clone(),
+        }
+    }
+
+    fn remember_view(&mut self) {
+        self.history.push(self.snapshot());
+    }
+
+    fn apply_snapshot(&mut self, snapshot: ViewSnapshot) {
+        self.current_line = snapshot.current_line;
+        self.focus = snapshot.focus;
+        self.locals = snapshot.locals;
+        self.globals = snapshot.globals;
+        self.stack = snapshot.stack;
+        self.output = snapshot.output;
+        self.last_exception = snapshot.last_exception;
+        self.scrolled_line = None;
+    }
+
+    fn can_go_back(&self) -> bool {
+        self.history.has_back() && !matches!(self.status, Status::Running)
+    }
+
+    fn can_go_forward(&self) -> bool {
+        self.history.has_forward() || (self.status.is_paused() && self.session.is_some())
+    }
+
+    fn can_continue(&self) -> bool {
+        self.status.is_paused() && self.session.is_some()
+    }
+
+    fn go_back(&mut self) {
+        if !self.can_go_back() {
+            return;
+        }
+        if let Some(snapshot) = self.history.back() {
+            self.apply_snapshot(snapshot);
+        }
+    }
+
     fn step(&mut self) {
+        // While reviewing saved states, "Шаг" moves through the history first.
+        // This makes back/forward safe and instant without restarting Python.
+        if let Some(snapshot) = self.history.forward() {
+            self.apply_snapshot(snapshot);
+            return;
+        }
+
         if let Some(session) = &mut self.session
             && session.send("step").is_ok()
         {
@@ -190,12 +382,39 @@ impl App {
     }
 
     fn continue_run(&mut self) {
+        if !self.can_continue() {
+            return;
+        }
+
+        // "Продолжить" resumes the live process. If the user is inspecting
+        // older states, first return the view to the live pause point.
+        if self.history.has_forward()
+            && let Some(snapshot) = self.history.latest()
+        {
+            self.apply_snapshot(snapshot);
+        }
+
         if let Some(session) = &mut self.session
             && session.send("continue").is_ok()
         {
             self.status = Status::Running;
             self.focus.clear();
         }
+    }
+
+    fn handle_dropped_files(&mut self, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+
+        if let Some(path) = paths.into_iter().find(|path| is_python_source(path)) {
+            self.load_file(path);
+            return;
+        }
+
+        self.append_output(
+            "[CodeVisualizer] файл не открыт: перетащите файл Python (.py или .pyw)\n",
+        );
     }
 
     fn stop_session(&mut self) {
@@ -231,6 +450,7 @@ impl App {
                 if let Some(exception) = event.exception {
                     self.last_exception = Some(exception);
                 }
+                self.remember_view();
                 if event.kind == "line" {
                     self.status = Status::Paused;
                     if self.auto_steps > 0 {
@@ -245,6 +465,9 @@ impl App {
                 stopped,
             }) => {
                 self.append_output(&output);
+                // The last saved pause point should show the final output too
+                // when the user reviews history after the program has ended.
+                self.history.update_latest_output(self.output.clone());
                 self.session = None;
                 self.status = if let Some(error) = error {
                     Status::Error(error)
@@ -289,7 +512,7 @@ impl App {
         ui.horizontal(|ui| {
             if ui.button("Открыть…").clicked()
                 && let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Python", &["py"])
+                    .add_filter("Python", &["py", "pyw"])
                     .pick_file()
             {
                 self.load_file(path);
@@ -313,14 +536,32 @@ impl App {
             }
 
             if ui
-                .add_enabled(self.status.is_paused(), egui::Button::new("Шаг"))
+                .add_enabled(self.can_go_back(), egui::Button::new("Назад"))
+                .on_hover_text("Вернуться к предыдущей сохранённой остановке")
+                .clicked()
+            {
+                self.go_back();
+            }
+
+            if ui
+                .add_enabled(self.can_go_forward(), egui::Button::new("Шаг"))
+                .on_hover_text(if self.history.has_forward() {
+                    "Перейти к следующей сохранённой остановке"
+                } else {
+                    "Выполнить текущую строку"
+                })
                 .clicked()
             {
                 self.step();
             }
 
             if ui
-                .add_enabled(self.status.is_paused(), egui::Button::new("Продолжить"))
+                .add_enabled(self.can_continue(), egui::Button::new("Продолжить"))
+                .on_hover_text(if self.history.has_forward() {
+                    "Вернуться к текущему состоянию и продолжить выполнение"
+                } else {
+                    "Выполнить программу до конца"
+                })
                 .clicked()
             {
                 self.continue_run();
@@ -348,14 +589,25 @@ impl App {
                         .truncate(),
                 );
             } else {
-                ui.weak("файл не выбран — откройте .py или перетащите его в окно");
+                ui.weak("файл не выбран — откройте .py/.pyw или перетащите его в окно");
             }
         });
     }
 
     fn status_bar(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let (text, color) = self.status.label();
+            let (text, color) = if self.history.has_forward() {
+                (
+                    format!(
+                        "Просмотр истории: {}/{}",
+                        self.history.position(),
+                        self.history.len()
+                    ),
+                    ACCENT,
+                )
+            } else {
+                self.status.label()
+            };
             ui.add(egui::Label::new(egui::RichText::new(text).color(color)).truncate());
 
             if let Some(line) = self.current_line {
@@ -513,7 +765,7 @@ impl App {
                     ui.heading("CodeVisualizer");
                     ui.label("Пошаговая визуализация выполнения Python-кода");
                     ui.add_space(8.0);
-                    ui.label("Откройте .py файл, перетащите его в окно или запустите демо.");
+                    ui.label("Откройте .py/.pyw файл, перетащите его в окно или запустите демо.");
                     ui.add_space(10.0);
                     ui.label("Если диалог выбора файла недоступен, вставьте путь:");
                     ui.horizontal(|ui| {
@@ -611,9 +863,7 @@ impl eframe::App for App {
                 .map(|file| file.path().to_path_buf())
                 .collect()
         });
-        if let Some(path) = dropped.into_iter().next() {
-            self.load_file(path);
-        }
+        self.handle_dropped_files(dropped);
 
         self.poll();
 
@@ -623,5 +873,137 @@ impl eframe::App for App {
             .default_size(430.0)
             .show(ui, |ui| self.side_panel(ui));
         egui::CentralPanel::default().show(ui, |ui| self.code_panel(ui));
+
+        let hovered: Vec<PathBuf> = ui.ctx().input(|input| {
+            input
+                .raw
+                .hovered_files
+                .iter()
+                .filter_map(|file| file.path.clone())
+                .collect()
+        });
+        if !hovered.is_empty() {
+            draw_drop_overlay(ui.ctx(), &hovered);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snapshot(line: usize) -> ViewSnapshot {
+        ViewSnapshot {
+            current_line: Some(line),
+            ..ViewSnapshot::default()
+        }
+    }
+
+    fn test_app() -> App {
+        App {
+            script_path: None,
+            code: Vec::new(),
+            current_line: None,
+            focus: Vec::new(),
+            only_structures: true,
+            locals: Vec::new(),
+            globals: Vec::new(),
+            stack: Vec::new(),
+            output: String::new(),
+            last_exception: None,
+            status: Status::Paused,
+            session: None,
+            show_globals: false,
+            scrolled_line: None,
+            auto_steps: 0,
+            program_input: String::new(),
+            path_input: String::new(),
+            animations: ValueAnimations::default(),
+            history: ViewHistory::default(),
+            ctx: egui::Context::default(),
+        }
+    }
+
+    #[test]
+    fn app_back_and_step_restore_saved_views() {
+        let mut app = test_app();
+        for (line, output) in [(1, "a"), (2, "ab"), (3, "abc")] {
+            app.history.push(ViewSnapshot {
+                current_line: Some(line),
+                output: output.to_owned(),
+                ..ViewSnapshot::default()
+            });
+        }
+        app.history.latest();
+
+        app.current_line = Some(3);
+        app.output = "abc".to_owned();
+        app.go_back();
+        assert_eq!(app.current_line, Some(2));
+        assert_eq!(app.output, "ab");
+
+        app.go_back();
+        assert_eq!(app.current_line, Some(1));
+        assert_eq!(app.output, "a");
+
+        app.step();
+        assert_eq!(app.current_line, Some(2));
+        assert_eq!(app.output, "ab");
+    }
+
+    #[test]
+    fn history_moves_back_then_truncates_when_stepping_again() {
+        let mut history = ViewHistory::default();
+        history.push(snapshot(1));
+        history.push(snapshot(2));
+        history.push(snapshot(3));
+
+        assert_eq!(history.back().unwrap().current_line, Some(2));
+        assert_eq!(history.back().unwrap().current_line, Some(1));
+        assert!(history.back().is_none());
+        assert_eq!(history.forward().unwrap().current_line, Some(2));
+
+        history.push(snapshot(9));
+        assert_eq!(history.len(), 3);
+        assert_eq!(history.position(), 3);
+        assert!(!history.has_forward());
+        assert_eq!(history.latest().unwrap().current_line, Some(9));
+    }
+
+    #[test]
+    fn finished_output_updates_latest_snapshot() {
+        let mut history = ViewHistory::default();
+        history.push(snapshot(1));
+        history.push(snapshot(2));
+        history.update_latest_output("result\n".to_owned());
+
+        assert_eq!(history.latest().unwrap().output, "result\n");
+        assert_eq!(history.back().unwrap().output, "");
+    }
+
+    #[test]
+    fn accepts_python_source_extensions() {
+        assert!(is_python_source(Path::new("script.py")));
+        assert!(is_python_source(Path::new("script.PY")));
+        assert!(is_python_source(Path::new("script.pyw")));
+        assert!(!is_python_source(Path::new("script.txt")));
+        assert!(!is_python_source(Path::new("script")));
+        assert!(!is_python_source(Path::new("py")));
+    }
+
+    #[test]
+    fn dropped_python_file_is_loaded() {
+        let dir = std::env::temp_dir().join("codevisualizer-test-drop");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("drop-{}.py", std::process::id()));
+        std::fs::write(&path, "x = 1\n").unwrap();
+
+        let mut app = test_app();
+        app.handle_dropped_files(vec![PathBuf::from("notes.txt"), path.clone()]);
+
+        assert_eq!(app.code, vec!["x = 1".to_owned()]);
+        assert_eq!(app.script_path.as_deref(), Some(path.as_path()));
+        assert_eq!(app.status, Status::Idle);
+        let _ = std::fs::remove_file(path);
     }
 }
