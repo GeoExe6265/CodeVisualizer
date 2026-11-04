@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::tracer::{FrameInfo, Incoming, Session, TracerMsg};
-use crate::value::{Focus, FocusRole, ValueNode, is_data_structure, show_value};
+use crate::value::{Focus, FocusRole, ValueAnimations, ValueNode, is_data_structure, show_value};
 
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(110, 170, 255);
 const ACTION_GREEN: egui::Color32 = egui::Color32::from_rgb(110, 210, 140);
@@ -63,6 +63,7 @@ pub struct App {
     auto_steps: usize,
     program_input: String,
     path_input: String,
+    animations: ValueAnimations,
     ctx: egui::Context,
 }
 
@@ -87,6 +88,7 @@ impl App {
             auto_steps: 0,
             program_input: String::new(),
             path_input: String::new(),
+            animations: ValueAnimations::default(),
             ctx,
         };
 
@@ -152,6 +154,7 @@ impl App {
         self.output.clear();
         self.last_exception = None;
         self.scrolled_line = None;
+        self.animations.clear();
     }
 
     fn start(&mut self) {
@@ -435,7 +438,15 @@ impl App {
                         } else {
                             for (name, value) in visible {
                                 let mut path = Vec::new();
-                                show_value(ui, name, value, name, &mut path, &self.focus);
+                                show_value(
+                                    ui,
+                                    name,
+                                    value,
+                                    name,
+                                    &mut path,
+                                    &self.focus,
+                                    &mut self.animations,
+                                );
                             }
                         }
                     });

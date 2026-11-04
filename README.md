@@ -17,6 +17,7 @@
 - подсветка текущей строки с автопрокруткой;
 - подсветка самих элементов списков, матриц и словарей, с которыми работает текущая строка: активный элемент зелёный, элемент обмена — красный;
 - только одна стрелка `->` — у активного элемента;
+- плавная анимация перестановки элементов списка: при сортировке и обмене строки съезжают на новые места, а не меняются мгновенно;
 - режим **«только массивы и словари»**: скаляры и служебные переменные скрыты;
 - дерево локальных и глобальных переменных: списки, кортежи, словари и объекты с такими полями;
 - стек вызовов с номерами строк;
@@ -160,6 +161,10 @@ values[0], values[2] = values[2], values[0]
 `values[0]` будет зелёным с `->`, а `values[2]` — красным без стрелки. Стрелка
 всегда одна.
 
+Когда элементы меняются местами во время сортировки или обмена, их строки
+плавно переезжают на новые позиции в течение половины секунды. Это работает
+для числовых и строковых элементов списков и вложенных списков матриц.
+
 Поддерживаются:
 
 - `values[index]`, `matrix[row][col]` — матрица раскрывается как вложенные списки;
@@ -215,8 +220,8 @@ cargo build --release --locked
 ## Релиз
 
 ```bash
-git tag v0.2.2
-git push origin v0.2.2
+git tag v0.2.3
+git push origin v0.2.3
 ```
 
 Workflow `.github/workflows/release.yml` соберёт
@@ -269,8 +274,9 @@ MIT — см. [LICENSE](LICENSE).
 Linux, built with Rust + egui and Python's `sys.settrace`. It shows the current
 line, variables, call stack and program output, highlights the list/array/dict
 elements used by the current line (the active element in green with a single
-pointer, its swap source in red without a pointer), and can hide scalar helper
-variables so only data structures remain. The prebuilt release
+pointer, its swap source in red without a pointer), animates list rows when
+they move during swaps and sorting, and can hide scalar helper variables so only
+data structures remain. The prebuilt release
 bundles Python 3.12 and needs no Rust or Python installation; it prefers the
 system Python 3.10+ when available (so pip packages work), otherwise falls back
 to the bundled interpreter. Scripts can read stdin through the "Ввод программы"

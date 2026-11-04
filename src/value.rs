@@ -1,3 +1,6 @@
+use std::cmp::Ordering;
+use std::collections::HashMap;
+
 use serde::Deserialize;
 
 const ACTION_ARROW: egui::Color32 = egui::Color32::from_rgb(110, 210, 140);
@@ -5,6 +8,7 @@ const ACTION_ELEMENT_BG: egui::Color32 = egui::Color32::from_rgb(43, 92, 61);
 const ACTION_ELEMENT_BORDER: egui::Color32 = egui::Color32::from_rgb(110, 210, 140);
 const SOURCE_ELEMENT_BG: egui::Color32 = egui::Color32::from_rgb(104, 48, 53);
 const SOURCE_ELEMENT_BORDER: egui::Color32 = egui::Color32::from_rgb(240, 115, 115);
+const MOVE_ANIMATION_SECONDS: f32 = 0.5;
 
 /// A serialized Python value produced by `python/tracer.py`.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -19,6 +23,74 @@ pub struct ValueNode {
     pub items: Vec<ValueNode>,
     #[serde(default)]
     pub entries: Vec<(ValueNode, ValueNode)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ItemKey {
+    type_name: String,
+    repr: String,
+}
+
+impl From<&ValueNode> for ItemKey {
+    fn from(value: &ValueNode) -> Self {
+        Self {
+            type_name: value.type_name.clone(),
+            repr: value.repr.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ListMotion {
+    previous: Vec<ItemKey>,
+    current: Vec<ItemKey>,
+    started_at: f64,
+}
+
+impl ListMotion {
+    fn new(keys: Vec<ItemKey>, now: f64) -> Self {
+        Self {
+            previous: keys.clone(),
+            current: keys,
+            started_at: now - f64::from(MOVE_ANIMATION_SECONDS),
+        }
+    }
+
+    fn observe(&mut self, keys: Vec<ItemKey>, now: f64) {
+        if keys != self.current {
+            self.previous = std::mem::replace(&mut self.current, keys);
+            self.started_at = now;
+        }
+    }
+
+    fn progress(&self, now: f64) -> f32 {
+        (((now - self.started_at) as f32) / MOVE_ANIMATION_SECONDS).clamp(0.0, 1.0)
+    }
+}
+
+/// Animation state for reordered list rows. It is keyed by the path of each
+/// expanded list, so a matrix can animate every one of its inner lists.
+#[derive(Default)]
+pub struct ValueAnimations {
+    lists: HashMap<String, ListMotion>,
+}
+
+impl ValueAnimations {
+    pub fn clear(&mut self) {
+        self.lists.clear();
+    }
+
+    fn motion(&mut self, key: String, keys: Vec<ItemKey>, now: f64) -> ListMotion {
+        let motion = self
+            .lists
+            .entry(key)
+            .or_insert_with(|| ListMotion::new(keys.clone(), now));
+        motion.observe(keys, now);
+        if motion.progress(now) >= 1.0 {
+            motion.previous.clone_from(&motion.current);
+        }
+        motion.clone()
+    }
 }
 
 /// A list/dict element used by the current source line.
@@ -86,6 +158,32 @@ fn focus_role(focus: &[Focus], root: &str, path: &[FocusStep]) -> Option<FocusRo
         .map(|target| target.role)
 }
 
+fn animation_key(root: &str, path: &[FocusStep]) -> String {
+    format!("{root}|{path:?}")
+}
+
+fn match_positions(previous: &[ItemKey], current: &[ItemKey]) -> Vec<Option<usize>> {
+    let mut used = vec![false; previous.len()];
+    current
+        .iter()
+        .map(|key| {
+            let found = previous
+                .iter()
+                .enumerate()
+                .find(|(index, old)| !used[*index] && *old == key)
+                .map(|(index, _)| index);
+            if let Some(index) = found {
+                used[index] = true;
+            }
+            found
+        })
+        .collect()
+}
+
+fn ease_in_out(progress: f32) -> f32 {
+    progress * progress * (3.0 - 2.0 * progress)
+}
+
 impl ValueNode {
     fn is_container(&self) -> bool {
         !self.items.is_empty() || !self.entries.is_empty()
@@ -114,45 +212,12 @@ pub fn show_value(
     root: &str,
     path: &mut Vec<FocusStep>,
     focus: &[Focus],
+    animations: &mut ValueAnimations,
 ) {
     let role = focus_role(focus, root, path);
-    let highlighted = role.is_some();
-    let show_pointer = role == Some(FocusRole::Primary);
-    let (fill, border) = match role {
-        Some(FocusRole::Source) => (SOURCE_ELEMENT_BG, SOURCE_ELEMENT_BORDER),
-        Some(_) => (ACTION_ELEMENT_BG, ACTION_ELEMENT_BORDER),
-        None => (egui::Color32::TRANSPARENT, egui::Color32::TRANSPARENT),
-    };
 
     if !value.is_container() {
-        let row = |ui: &mut egui::Ui| {
-            ui.horizontal(|ui| {
-                if show_pointer {
-                    ui.label(egui::RichText::new("->").color(ACTION_ARROW).strong());
-                }
-                ui.monospace(name);
-                ui.monospace("=");
-                ui.label(
-                    egui::RichText::new(&value.repr)
-                        .monospace()
-                        .color(type_color(&value.type_name)),
-                );
-            });
-        };
-
-        if highlighted {
-            egui::Frame::NONE
-                .fill(fill)
-                .stroke(egui::Stroke::new(1.0, border))
-                .corner_radius(4)
-                .inner_margin(egui::Margin::symmetric(4, 1))
-                .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    row(ui);
-                });
-        } else {
-            row(ui);
-        }
+        show_scalar_row(ui, name, value, role, false);
         return;
     }
 
@@ -169,6 +234,21 @@ pub fn show_value(
     let visible_count = visible_entries.len();
     let shown = value.items.len() + visible_count;
     let header = format!("{name} = {}({})", value.type_name, value.count());
+
+    // Animate simple rows only. Nested matrices keep their existing tree
+    // rendering; their inner scalar lists animate independently.
+    let animate_items = matches!(value.type_name.as_str(), "list" | "tuple")
+        && !value.items.is_empty()
+        && value.entries.is_empty()
+        && value.items.iter().all(|item| !item.is_container());
+    let motion = if animate_items {
+        let now = ui.input(|input| input.time);
+        let keys = value.items.iter().map(ItemKey::from).collect();
+        Some(animations.motion(animation_key(root, path), keys, now))
+    } else {
+        None
+    };
+
     egui::CollapsingHeader::new(header_widget(
         ui,
         header,
@@ -177,10 +257,22 @@ pub fn show_value(
     ))
     .default_open(true)
     .show(ui, |ui| {
-        for (index, item) in value.items.iter().enumerate() {
-            path.push(FocusStep::Index { index });
-            show_value(ui, &format!("[{index}]"), item, root, path, focus);
-            path.pop();
+        if let Some(motion) = &motion {
+            show_animated_list(ui, value, root, path, focus, motion);
+        } else {
+            for (index, item) in value.items.iter().enumerate() {
+                path.push(FocusStep::Index { index });
+                show_value(
+                    ui,
+                    &format!("[{index}]"),
+                    item,
+                    root,
+                    path,
+                    focus,
+                    animations,
+                );
+                path.pop();
+            }
         }
 
         for (key, item) in visible_entries {
@@ -192,7 +284,7 @@ pub fn show_value(
             path.push(FocusStep::Key {
                 key: key.repr.clone(),
             });
-            show_value(ui, &key_name, item, root, path, focus);
+            show_value(ui, &key_name, item, root, path, focus, animations);
             path.pop();
         }
 
@@ -203,6 +295,112 @@ pub fn show_value(
             ui.weak(format!("… показаны первые {shown}"));
         }
     });
+}
+
+fn show_animated_list(
+    ui: &mut egui::Ui,
+    value: &ValueNode,
+    root: &str,
+    path: &mut Vec<FocusStep>,
+    focus: &[Focus],
+    motion: &ListMotion,
+) {
+    let now = ui.input(|input| input.time);
+    let progress = motion.progress(now);
+    if progress < 1.0 {
+        ui.ctx().request_repaint();
+    }
+    let eased = ease_in_out(progress);
+    let old_positions = match_positions(&motion.previous, &motion.current);
+
+    let text_height = ui.text_style_height(&egui::TextStyle::Monospace);
+    let row_height = text_height + 2.0;
+    let spacing = ui.spacing().item_spacing.y;
+    let slot = row_height + spacing;
+    let visual_len = value.items.len().max(motion.previous.len());
+    let total_height = (slot * visual_len as f32 - spacing).max(0.0);
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), total_height),
+        egui::Sense::hover(),
+    );
+
+    let mut rows: Vec<(usize, f32, bool)> = value
+        .items
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let old_index = old_positions.get(index).copied().flatten();
+            let from = old_index.unwrap_or(index) as f32 * slot;
+            let to = index as f32 * slot;
+            let y = from + (to - from) * eased;
+            let moving = old_index.is_some_and(|old| old != index) && progress < 1.0;
+            (index, y, moving)
+        })
+        .collect();
+    rows.sort_by(|left, right| left.1.partial_cmp(&right.1).unwrap_or(Ordering::Equal));
+
+    for (index, y, moving) in rows {
+        let row_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.left(), rect.top() + y),
+            egui::vec2(rect.width(), row_height),
+        );
+        path.push(FocusStep::Index { index });
+        let role = focus_role(focus, root, path);
+        let name = format!("[{index}]");
+        let mut row_ui = ui.new_child(egui::UiBuilder::new().max_rect(row_rect));
+        show_scalar_row(&mut row_ui, &name, &value.items[index], role, moving);
+        path.pop();
+    }
+}
+
+fn show_scalar_row(
+    ui: &mut egui::Ui,
+    name: &str,
+    value: &ValueNode,
+    role: Option<FocusRole>,
+    occlude: bool,
+) {
+    let show_pointer = role == Some(FocusRole::Primary);
+    let row = |ui: &mut egui::Ui| {
+        ui.horizontal(|ui| {
+            if show_pointer {
+                ui.label(egui::RichText::new("->").color(ACTION_ARROW).strong());
+            }
+            ui.monospace(name);
+            ui.monospace("=");
+            ui.label(
+                egui::RichText::new(&value.repr)
+                    .monospace()
+                    .color(type_color(&value.type_name)),
+            );
+        });
+    };
+
+    let highlight = match role {
+        Some(FocusRole::Source) => Some((SOURCE_ELEMENT_BG, SOURCE_ELEMENT_BORDER)),
+        Some(_) => Some((ACTION_ELEMENT_BG, ACTION_ELEMENT_BORDER)),
+        None => None,
+    };
+    if let Some((fill, border)) = highlight {
+        egui::Frame::NONE
+            .fill(fill)
+            .stroke(egui::Stroke::new(1.0, border))
+            .corner_radius(4)
+            .inner_margin(egui::Margin::symmetric(4, 1))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                row(ui);
+            });
+    } else if occlude {
+        egui::Frame::NONE
+            .fill(ui.visuals().panel_fill)
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                row(ui);
+            });
+    } else {
+        row(ui);
+    }
 }
 
 fn header_widget(
@@ -291,6 +489,51 @@ mod tests {
                 FocusStep::Index { index: 0 }
             ]
         ));
+    }
+
+    fn item_key(repr: &str) -> ItemKey {
+        ItemKey {
+            type_name: "int".to_owned(),
+            repr: repr.to_owned(),
+        }
+    }
+
+    #[test]
+    fn matches_reordered_rows_by_value() {
+        let previous = vec![item_key("10"), item_key("20"), item_key("30")];
+        let current = vec![item_key("30"), item_key("20"), item_key("10")];
+
+        assert_eq!(
+            match_positions(&previous, &current),
+            [Some(2), Some(1), Some(0)]
+        );
+    }
+
+    #[test]
+    fn matches_duplicate_rows_without_reusing_an_item() {
+        let previous = vec![item_key("1"), item_key("2"), item_key("1")];
+        let current = vec![item_key("1"), item_key("1"), item_key("2")];
+
+        assert_eq!(
+            match_positions(&previous, &current),
+            [Some(0), Some(2), Some(1)]
+        );
+    }
+
+    #[test]
+    fn starts_motion_when_order_changes() {
+        let previous = vec![item_key("10"), item_key("20"), item_key("30")];
+        let current = vec![item_key("30"), item_key("20"), item_key("10")];
+        let mut motion = ListMotion::new(previous.clone(), 10.0);
+        assert_eq!(motion.progress(10.0), 1.0);
+
+        motion.observe(current.clone(), 20.0);
+
+        assert_eq!(motion.previous, previous);
+        assert_eq!(motion.current, current);
+        assert_eq!(motion.progress(20.0), 0.0);
+        assert!(motion.progress(20.2) > 0.0);
+        assert_eq!(motion.progress(30.0), 1.0);
     }
 
     #[test]
