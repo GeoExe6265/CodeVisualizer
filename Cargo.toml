@@ -1,6 +1,6 @@
 [package]
 name = "codevisualizer"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 rust-version = "1.95"
 description = "Step-by-step Python execution visualizer with variables, call stack and output"
@@ -16,6 +16,7 @@ egui = "0.37.0"
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+winit = { version = "0.30.13", default-features = false, features = ["x11"] }
 
 [profile.release]
 lto = "thin"
