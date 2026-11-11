@@ -16,7 +16,8 @@ egui = "0.37.0"
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-winit = { version = "0.30.13", default-features = false, features = ["x11"] }
+# Load Wayland at runtime so release builds don't require libwayland-dev.
+winit = { version = "0.30.13", default-features = false, features = ["x11", "wayland", "wayland-dlopen"] }
 
 [profile.release]
 lto = "thin"
