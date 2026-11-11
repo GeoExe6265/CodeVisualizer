@@ -20,18 +20,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: System dependencies
-        timeout-minutes: 10
+        timeout-minutes: 8
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          # Force IPv4 and retry: some GitHub runners otherwise hang on IPv6
-          # mirror connections during apt-get update.
-          sudo apt-get update \
-            -o Acquire::ForceIPv4=true \
-            -o Acquire::Retries=3
+          # Use the package indexes already present in the runner image. An
+          # unconditional apt-get update occasionally stalls for a long time
+          # on the hosted runners; install still fetches only the needed debs.
           sudo apt-get install -y --no-install-recommends \
             -o Acquire::ForceIPv4=true \
             -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
             pkg-config \
             libxkbcommon-dev \
             libwayland-dev \
