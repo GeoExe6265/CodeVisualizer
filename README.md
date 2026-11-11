@@ -25,6 +25,8 @@
 - стек вызовов с номерами строк;
 - перехват `print` и вывода в `stderr`;
 - показ необработанного исключения вместе с состоянием на месте ошибки;
+- время выполнения и пиковая память процесса Python; единицы (мс/с и КБ/МБ)
+  выбираются в отдельном окне **«Настройки»**;
 - нативный интерфейс на Rust + egui, работает на Wayland и X11;
 - собственная иконка окна (встроена в бинарник);
 - демо-пример `examples/demo.py` (пузырьковая сортировка и рекурсивный `fib`).
@@ -119,6 +121,7 @@ KDE и в списке «Открыть с помощью» для `.py` фай�
 | Шаг | выполняет одну строку; в режиме просмотра истории переходит к следующей остановке |
 | Продолжить | выполняет программу до конца; из просмотра истории сначала возвращает к текущему состоянию |
 | Стоп | завершает процесс Python |
+| Настройки | выбор единиц времени (мс/с) и памяти (КБ/МБ) |
 
 Кнопка **«Назад»** работает по сохранённым снимкам состояния и не
 перезапускает Python. Поэтому можно спокойно вернуться на несколько шагов,
@@ -127,6 +130,18 @@ KDE и в списке «Открыть с помощью» для `.py` фай�
 остановки, «Шаг» продолжит выполнять программу. В статусной строке при
 просмотре истории показывается текущая позиция. Хранятся последние 500
 остановок.
+
+После каждой остановки и после завершения программы в статусной строке
+показываются время выполнения и пиковое потребление памяти. Время не включает
+паузы на пошаговый просмотр — учитывается только работа самого Python-кода.
+Память считается по пиковому RSS процесса Python, поэтому включает память
+интерпретатора.
+
+Кнопка **«Настройки»** позволяет выбрать миллисекунды или секунды для времени и
+килобайты или мегабайты для памяти. Выбор сохраняется в
+`~/.config/codevisualizer/settings.json` (или в
+`$XDG_CONFIG_HOME/codevisualizer/settings.json`) и применяется сразу, в том
+числе к уже показанному результату.
 
 Слева — код с подсветкой текущей строки. Справа — переменные, стек вызовов и
 вывод программы. Переменные можно сворачивать и разворачивать, как в обычном
@@ -242,8 +257,8 @@ cargo build --release --locked
 ## Релиз
 
 ```bash
-git tag v0.2.5
-git push origin v0.2.5
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 Workflow `.github/workflows/release.yml` соберёт
@@ -298,7 +313,9 @@ line, variables, call stack and program output, highlights the list/array/dict
 elements used by the current line (the active element in green with a single
 pointer, its swap source in red without a pointer), animates list rows when
 they move during swaps and sorting, supports stepping back through saved
-states, and can hide scalar helper variables so only data structures remain.
+states, shows execution time (excluding step-through pauses) and peak Python
+process memory, and can hide scalar helper variables so only data structures
+remain. Time and memory units are selected in the separate Settings window.
 Python files can be opened with a dialog, a command-line argument, or by
 dragging `.py`/`.pyw` files anywhere into the window. The prebuilt release
 bundles Python 3.12 and needs no Rust or Python installation; it prefers the

@@ -73,6 +73,10 @@ pub struct TracerEvent {
     pub exception: Option<String>,
     #[serde(default)]
     pub focus: Vec<Focus>,
+    #[serde(default)]
+    pub elapsed_ns: u64,
+    #[serde(default)]
+    pub memory_bytes: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,6 +92,10 @@ pub enum TracerMsg {
         error: Option<String>,
         #[serde(default)]
         stopped: bool,
+        #[serde(default)]
+        elapsed_ns: u64,
+        #[serde(default)]
+        memory_bytes: u64,
     },
     #[serde(rename = "error")]
     Error { message: String },
@@ -224,6 +232,8 @@ mod tests {
         let first = next_event(&session);
         assert_eq!(first.kind, "line");
         assert_eq!(first.line, Some(1));
+        assert!(first.elapsed_ns > 0);
+        assert!(first.memory_bytes > 0);
 
         session.send("step").unwrap();
         let second = next_event(&session);
@@ -237,9 +247,17 @@ mod tests {
                 .recv_timeout(Duration::from_secs(10))
                 .expect("tracer timed out")
             {
-                Incoming::Msg(TracerMsg::Finished { output, error, .. }) => {
+                Incoming::Msg(TracerMsg::Finished {
+                    output,
+                    error,
+                    elapsed_ns,
+                    memory_bytes,
+                    ..
+                }) => {
                     assert!(error.is_none(), "unexpected error: {error:?}");
                     assert!(output.contains('3'), "missing output: {output:?}");
+                    assert!(elapsed_ns > 0);
+                    assert!(memory_bytes > 0);
                     break;
                 }
                 Incoming::Msg(_) => {}

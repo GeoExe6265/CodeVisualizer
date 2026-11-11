@@ -16,7 +16,9 @@ import ast
 import io
 import json
 import os
+import resource
 import sys
+import time
 import traceback
 
 MAX_ITEMS = 50
@@ -99,6 +101,43 @@ def output_delta():
         output_sent = len(text)
         return chunk
     return ""
+
+
+# Only time spent executing the traced program is accumulated. The tracer
+# stops this clock while it serializes a snapshot and while it waits for the
+# next "step" command from the UI.
+active_ns = 0
+active_since_ns = None
+
+
+def start_active_timer():
+    global active_since_ns
+    active_since_ns = time.perf_counter_ns()
+
+
+def stop_active_timer():
+    global active_ns, active_since_ns
+    if active_since_ns is not None:
+        active_ns += max(0, time.perf_counter_ns() - active_since_ns)
+        active_since_ns = None
+
+
+def peak_memory_bytes():
+    try:
+        value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    except (AttributeError, OSError, ValueError):
+        return 0
+    # Linux reports KiB; macOS reports bytes.
+    if sys.platform == "darwin":
+        return int(value)
+    return int(value) * 1024
+
+
+def metrics_payload():
+    return {
+        "elapsed_ns": int(active_ns),
+        "memory_bytes": peak_memory_bytes(),
+    }
 
 
 def shorten(text):
@@ -458,6 +497,7 @@ def snapshot(frame, kind):
         "globals": visible(frame.f_globals.items()),
         "output": output_delta(),
         "focus": focus_targets(frame),
+        **metrics_payload(),
     }
 
 
@@ -479,10 +519,12 @@ def tracer(frame, event, arg):
 
     if event == "line":
         if stepping:
+            stop_active_timer()
             emit(snapshot(frame, "line"))
             command = wait_for_command()
             if command == "continue":
                 stepping = False
+            start_active_timer()
         return tracer
 
     return tracer
@@ -566,18 +608,33 @@ def main():
         return 1
 
     sys.settrace(tracer)
+    start_active_timer()
     try:
         exec(code, namespace)
-        status = {"type": "finished", "output": output_delta()}
+        stop_active_timer()
+        status = {
+            "type": "finished",
+            "output": output_delta(),
+            **metrics_payload(),
+        }
     except StopExecution:
-        status = {"type": "finished", "output": output_delta(), "stopped": True}
+        stop_active_timer()
+        status = {
+            "type": "finished",
+            "output": output_delta(),
+            "stopped": True,
+            **metrics_payload(),
+        }
     except BaseException as exc:
+        stop_active_timer()
         status = {
             "type": "finished",
             "output": output_delta(),
             "error": error_from_traceback(exc),
+            **metrics_payload(),
         }
     finally:
+        stop_active_timer()
         sys.settrace(None)
         if input_handle is not None:
             input_handle.close()

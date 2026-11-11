@@ -1,6 +1,8 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::tracer::{FrameInfo, Incoming, Session, TracerMsg};
 use crate::value::{Focus, FocusRole, ValueAnimations, ValueNode, is_data_structure, show_value};
 
@@ -12,6 +14,95 @@ const ERROR: egui::Color32 = egui::Color32::from_rgb(255, 120, 120);
 const OK: egui::Color32 = egui::Color32::from_rgb(130, 210, 130);
 const DEMO_SRC: &str = include_str!("../examples/demo.py");
 const HISTORY_LIMIT: usize = 500;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TimeUnit {
+    #[default]
+    Milliseconds,
+    Seconds,
+}
+
+impl TimeUnit {
+    fn format(self, seconds: f64) -> String {
+        match self {
+            Self::Milliseconds => format!("{:.2} мс", seconds * 1000.0),
+            Self::Seconds => format!("{:.3} с", seconds),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum MemoryUnit {
+    Kilobytes,
+    #[default]
+    Megabytes,
+}
+
+impl MemoryUnit {
+    fn format(self, bytes: u64) -> String {
+        if bytes == 0 {
+            return "—".to_owned();
+        }
+        match self {
+            Self::Kilobytes => format!("{:.0} КБ", bytes as f64 / 1024.0),
+            Self::Megabytes => format!("{:.1} МБ", bytes as f64 / (1024.0 * 1024.0)),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+struct Settings {
+    time_unit: TimeUnit,
+    memory_unit: MemoryUnit,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct RunMetrics {
+    elapsed_ns: u64,
+    memory_bytes: u64,
+}
+
+impl RunMetrics {
+    fn time_text(self, unit: TimeUnit) -> String {
+        unit.format(self.elapsed_ns as f64 / 1_000_000_000.0)
+    }
+
+    fn memory_text(self, unit: MemoryUnit) -> String {
+        unit.format(self.memory_bytes)
+    }
+}
+
+fn settings_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+    Some(base.join("codevisualizer").join("settings.json"))
+}
+
+fn load_settings() -> Settings {
+    settings_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn save_settings(settings: &Settings) {
+    let Some(path) = settings_path() else {
+        return;
+    };
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    if let Ok(text) = serde_json::to_string_pretty(settings) {
+        let _ = std::fs::write(path, text);
+    }
+}
 
 fn is_python_source(path: &Path) -> bool {
     path.extension()
@@ -199,6 +290,9 @@ pub struct App {
     path_input: String,
     animations: ValueAnimations,
     history: ViewHistory,
+    settings: Settings,
+    settings_open: bool,
+    metrics: Option<RunMetrics>,
     ctx: egui::Context,
 }
 
@@ -225,6 +319,9 @@ impl App {
             path_input: String::new(),
             animations: ValueAnimations::default(),
             history: ViewHistory::default(),
+            settings: load_settings(),
+            settings_open: false,
+            metrics: None,
             ctx,
         };
 
@@ -292,6 +389,7 @@ impl App {
         self.scrolled_line = None;
         self.animations.clear();
         self.history.clear();
+        self.metrics = None;
     }
 
     fn start(&mut self) {
@@ -450,6 +548,12 @@ impl App {
                 if let Some(exception) = event.exception {
                     self.last_exception = Some(exception);
                 }
+                if event.elapsed_ns > 0 || event.memory_bytes > 0 {
+                    self.metrics = Some(RunMetrics {
+                        elapsed_ns: event.elapsed_ns,
+                        memory_bytes: event.memory_bytes,
+                    });
+                }
                 self.remember_view();
                 if event.kind == "line" {
                     self.status = Status::Paused;
@@ -463,8 +567,16 @@ impl App {
                 output,
                 error,
                 stopped,
+                elapsed_ns,
+                memory_bytes,
             }) => {
                 self.append_output(&output);
+                if elapsed_ns > 0 || memory_bytes > 0 {
+                    self.metrics = Some(RunMetrics {
+                        elapsed_ns,
+                        memory_bytes,
+                    });
+                }
                 // The last saved pause point should show the final output too
                 // when the user reviews history after the program has ended.
                 self.history.update_latest_output(self.output.clone());
@@ -578,6 +690,12 @@ impl App {
 
             ui.separator();
 
+            if ui.button("Настройки").clicked() {
+                self.settings_open = true;
+            }
+
+            ui.separator();
+
             if let Some(path) = &self.script_path {
                 let name = path
                     .file_name()
@@ -595,6 +713,15 @@ impl App {
     }
 
     fn status_bar(&self, ui: &mut egui::Ui) {
+        let time_text = self
+            .metrics
+            .map(|metrics| metrics.time_text(self.settings.time_unit))
+            .unwrap_or_else(|| "—".to_owned());
+        let memory_text = self
+            .metrics
+            .map(|metrics| metrics.memory_text(self.settings.memory_unit))
+            .unwrap_or_else(|| "—".to_owned());
+
         ui.horizontal(|ui| {
             let (text, color) = if self.history.has_forward() {
                 (
@@ -616,9 +743,80 @@ impl App {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add(egui::Label::new(
+                    egui::RichText::new(format!("Время: {time_text}")).weak(),
+                ))
+                .on_hover_text("Время выполнения Python-кода без пауз на пошаговый просмотр");
+                ui.separator();
+                ui.add(egui::Label::new(
+                    egui::RichText::new(format!("Память: {memory_text}")).weak(),
+                ))
+                .on_hover_text(
+                    "Пиковое потребление RAM процессом Python (RSS), включая интерпретатор",
+                );
+                ui.separator();
                 ui.weak("Python 3 · sys.settrace");
             });
         });
+    }
+
+    fn settings_window(&mut self) {
+        if !self.settings_open {
+            return;
+        }
+
+        let mut open = true;
+        let mut close_clicked = false;
+        let mut settings = self.settings;
+        egui::Window::new("Настройки")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(&self.ctx, |ui| {
+                ui.set_min_width(430.0);
+                ui.label("Единицы измерения результатов:");
+                ui.add_space(4.0);
+
+                ui.label("Время выполнения:");
+                ui.radio_value(
+                    &mut settings.time_unit,
+                    TimeUnit::Milliseconds,
+                    "миллисекунды (мс)",
+                );
+                ui.radio_value(&mut settings.time_unit, TimeUnit::Seconds, "секунды (с)");
+
+                ui.add_space(6.0);
+                ui.label("Используемая память:");
+                ui.radio_value(
+                    &mut settings.memory_unit,
+                    MemoryUnit::Kilobytes,
+                    "килобайты (КБ)",
+                );
+                ui.radio_value(
+                    &mut settings.memory_unit,
+                    MemoryUnit::Megabytes,
+                    "мегабайты (МБ)",
+                );
+
+                ui.separator();
+                ui.weak(
+                    "Время не включает паузы на пошаговый просмотр. \
+                     Память — пиковое потребление RAM процессом Python, \
+                     включая интерпретатор.",
+                );
+                ui.add_space(8.0);
+                if ui.button("Закрыть").clicked() {
+                    close_clicked = true;
+                }
+            });
+
+        let changed = settings != self.settings;
+        self.settings = settings;
+        if changed {
+            save_settings(&self.settings);
+        }
+        self.settings_open = open && !close_clicked;
     }
 
     fn side_panel(&mut self, ui: &mut egui::Ui) {
@@ -874,6 +1072,8 @@ impl eframe::App for App {
             .show(ui, |ui| self.side_panel(ui));
         egui::CentralPanel::default().show(ui, |ui| self.code_panel(ui));
 
+        self.settings_window();
+
         let hovered: Vec<PathBuf> = ui.ctx().input(|input| {
             input
                 .raw
@@ -920,6 +1120,9 @@ mod tests {
             path_input: String::new(),
             animations: ValueAnimations::default(),
             history: ViewHistory::default(),
+            settings: Settings::default(),
+            settings_open: false,
+            metrics: None,
             ctx: egui::Context::default(),
         }
     }
@@ -989,6 +1192,26 @@ mod tests {
         assert!(!is_python_source(Path::new("script.txt")));
         assert!(!is_python_source(Path::new("script")));
         assert!(!is_python_source(Path::new("py")));
+    }
+
+    #[test]
+    fn formats_time_and_memory_units() {
+        assert_eq!(TimeUnit::Milliseconds.format(0.123456), "123.46 мс");
+        assert_eq!(TimeUnit::Seconds.format(0.123456), "0.123 с");
+        assert_eq!(MemoryUnit::Kilobytes.format(1_572_864), "1536 КБ");
+        assert_eq!(MemoryUnit::Megabytes.format(1_572_864), "1.5 МБ");
+        assert_eq!(MemoryUnit::Megabytes.format(0), "—");
+    }
+
+    #[test]
+    fn settings_serialize_round_trip() {
+        let settings = Settings {
+            time_unit: TimeUnit::Seconds,
+            memory_unit: MemoryUnit::Kilobytes,
+        };
+        let text = serde_json::to_string(&settings).unwrap();
+        let restored: Settings = serde_json::from_str(&text).unwrap();
+        assert_eq!(restored, settings);
     }
 
     #[test]
